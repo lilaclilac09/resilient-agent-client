@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/connection-pool",
+    "crates/circuit-breaker",
+    "crates/retry-budget",
+    "crates/telemetry-isolation",
+    "harness/proxy-flapper",
+]

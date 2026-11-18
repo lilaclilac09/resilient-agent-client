@@ -1,0 +1,7 @@
+[package]
+name = "telemetry-isolation"
+version = "0.1.0"
+edition = "2021"
+description = "Queue and traffic isolation for telemetry vs. interactive RPC for resilient-agent-client (stub)"
+
+[dependencies]

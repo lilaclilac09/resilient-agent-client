@@ -1,0 +1,7 @@
+[package]
+name = "proxy-flapper"
+version = "0.1.0"
+edition = "2021"
+description = "Toxiproxy-based local network/proxy flapping simulation harness (stub)"
+
+[dependencies]
