@@ -61,3 +61,18 @@ fn head_response_does_not_wait_for_a_body() {
     assert_eq!(r.status, 204);
     assert!(t.elapsed() < Duration::from_secs(1), "waited for a body");
 }
+
+#[test]
+fn urls_parse_into_scheme_origin_and_path() {
+    let (s, o, p) = parse_url("https://localhost:8443/v1/x?y=1").unwrap();
+    assert_eq!(
+        (s, o.key(), p.as_str()),
+        (Scheme::Https, "localhost:8443".to_string(), "/v1/x?y=1")
+    );
+    let (s, o, p) = parse_url("http://example.test").unwrap();
+    assert_eq!((s, o.port, p.as_str()), (Scheme::Http, 80, "/"));
+    assert_eq!(parse_url("https://h.test").unwrap().1.port, 443);
+    for bad in ["ftp://h/", "https://user:pw@h/", "https://", "https://h:x/"] {
+        assert!(parse_url(bad).is_err(), "{bad}");
+    }
+}

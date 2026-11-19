@@ -232,6 +232,29 @@ impl Drop for Mihomo {
     }
 }
 
+fn spawn_independent(
+    http: u16,
+    up: u16,
+    cfg: Arc<ClientConfig>,
+    stop: Arc<AtomicBool>,
+    ok: Arc<AtomicU64>,
+    err: Arc<AtomicU64>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut s = independent_tls(http, up, cfg).expect("independent connect");
+        while !stop.load(Ordering::SeqCst) {
+            match https_get(&mut s, "/independent") {
+                Ok(b) if b == "secure /independent" => ok.fetch_add(1, Ordering::SeqCst),
+                _ => {
+                    err.fetch_add(1, Ordering::SeqCst);
+                    break;
+                }
+            };
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    })
+}
+
 /// Independent client: hand-written CONNECT on mihomo's HTTP port.
 fn independent_tls(
     http_port: u16,
@@ -425,6 +448,106 @@ fn main() {
     let (steady_ok, steady_err) = (ok.swap(0, Ordering::SeqCst), err.swap(0, Ordering::SeqCst));
     let steady_peak = pool.stats().peak_per_origin;
 
+    // Phase 1b: the public `agent_client` API, as a consumer would use it:
+    // `Client::get("https://…")` through mihomo's mixed-port, TLS verified
+    // by the client itself, while a separate independent client stays up.
+    let api_cfg = |tls: agent_client::Tls| agent_client::ClientConfig {
+        proxy: agent_client::ProxyMode::Http(HttpConnectProxy::new(Origin::new(
+            "127.0.0.1",
+            mihomo.mixed,
+        ))),
+        tls,
+        ..agent_client::ClientConfig::default()
+    };
+    let api = Arc::new(
+        agent_client::Client::new(api_cfg(
+            agent_client::Tls::only_ca_pem(pki.ca_pem.as_bytes()).unwrap(),
+        ))
+        .unwrap(),
+    );
+    let stop_b = Arc::new(AtomicBool::new(false));
+    let (api_ind_ok, api_ind_err) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let independent_b = spawn_independent(
+        mihomo.http,
+        up,
+        trusted.clone(),
+        stop_b.clone(),
+        api_ind_ok.clone(),
+        api_ind_err.clone(),
+    );
+    let (api_ok, api_err) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let until = Instant::now() + steady;
+    let api_agents: Vec<_> = (0..agents)
+        .map(|i| {
+            let (api, ok, err) = (api.clone(), api_ok.clone(), api_err.clone());
+            std::thread::spawn(move || {
+                while Instant::now() < until {
+                    match api.get(&format!("https://localhost:{up}/api/{i}")) {
+                        Ok(r)
+                            if r.status == 200
+                                && r.body == format!("secure /api/{i}").as_bytes() =>
+                        {
+                            ok.fetch_add(1, Ordering::Relaxed)
+                        }
+                        other => {
+                            eprintln!("api agent {i}: {:?}", other.map(|r| r.status));
+                            err.fetch_add(1, Ordering::Relaxed)
+                        }
+                    };
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            })
+        })
+        .collect();
+    let example = match std::env::var("FETCH_EXAMPLE") {
+        Ok(path) => match Command::new(&path)
+            .arg(format!("https://localhost:{up}/example"))
+            .arg("--cacert")
+            .arg(&ca_file)
+            .args(["--proxy", &format!("http://127.0.0.1:{}", mihomo.mixed)])
+            .output()
+        {
+            Ok(o)
+                if o.status.success()
+                    && String::from_utf8_lossy(&o.stdout).trim() == "secure /example" =>
+            {
+                "ok".to_string()
+            }
+            Ok(o) => format!("failed: {}", String::from_utf8_lossy(&o.stderr).trim()),
+            Err(e) => format!("failed: {e}"),
+        },
+        Err(_) => "not built".to_string(),
+    };
+    for h in api_agents {
+        h.join().unwrap();
+    }
+    stop_b.store(true, Ordering::SeqCst);
+    independent_b.join().unwrap();
+    let untrusted = agent_client::Client::new(api_cfg(agent_client::Tls::webpki_roots())).unwrap();
+    let api_untrusted_rejected = matches!(
+        untrusted.get(&format!("https://localhost:{up}/neg")),
+        Err(agent_client::ClientError::Tls(_))
+    );
+    let api_wrong_name_rejected = matches!(
+        api.get(&format!("https://127.0.0.1:{up}/neg")),
+        Err(agent_client::ClientError::Tls(_))
+    );
+    let api_stats = api.pool().stats();
+    let api_breaker_closed =
+        api.breakers().state(&Origin::new("localhost", up).key()) == agent_client::State::Closed;
+    println!(
+        "{{\"phase\":\"public-api\",\"agents\":{agents},\"secs\":{},\"https_ok\":{},\"errors\":{},\"sockets_opened\":{},\"tls_sessions_reused\":{},\"peak_per_origin\":{},\"independent_ok\":{},\"independent_errors\":{},\"example\":\"{example}\",\"untrusted_ca_rejected\":{api_untrusted_rejected},\"wrong_name_rejected\":{api_wrong_name_rejected},\"breaker_closed\":{api_breaker_closed}}}",
+        steady.as_secs(),
+        api_ok.load(Ordering::SeqCst),
+        api_err.load(Ordering::SeqCst),
+        api_stats.opened,
+        api_stats.reused,
+        api_stats.peak_per_origin,
+        api_ind_ok.load(Ordering::SeqCst),
+        api_ind_err.load(Ordering::SeqCst),
+    );
+    drop(api);
+
     // Phase 2: one real mihomo restart under load.
     let (mut restart_ok, mut restart_err, mut recovery_ms) = (0, 0, 0u128);
     if restart {
@@ -476,6 +599,21 @@ fn main() {
         stats.open_now,
     );
     let mut fail = Vec::new();
+    if api_ok.load(Ordering::SeqCst) == 0 || api_err.load(Ordering::SeqCst) > 0 {
+        fail.push("public API HTTPS through mihomo had errors");
+    }
+    if api_ind_err.load(Ordering::SeqCst) > 0 || api_ind_ok.load(Ordering::SeqCst) == 0 {
+        fail.push("independent client disconnected during public-API phase");
+    }
+    if !api_untrusted_rejected || !api_wrong_name_rejected {
+        fail.push("public API did not enforce certificate validation");
+    }
+    if api_stats.peak_per_origin > cap {
+        fail.push("public API exceeded per-origin cap");
+    }
+    if example.starts_with("failed") {
+        fail.push("fetch example failed");
+    }
     if steady_ok == 0 || steady_err > 0 {
         fail.push("steady-state HTTPS through mihomo had errors");
     }

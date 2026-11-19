@@ -213,7 +213,12 @@ pub struct PoolStats {
 struct Idle {
     stream: TcpStream,
     since: Instant,
+    session: Option<Session>,
 }
+
+/// Per-connection state a caller keeps with a pooled socket (e.g. a TLS
+/// session), returned with the socket on the next checkout.
+pub type Session = Box<dyn std::any::Any + Send>;
 
 #[derive(Default)]
 struct Slot {
@@ -286,7 +291,7 @@ impl Pool {
                 inner.stats.reused += 1;
                 inner.stats.idle_now -= 1;
                 drop(g);
-                return Ok(self.make_conn(key, idle.stream, true));
+                return Ok(self.make_conn(key, idle.stream, true, idle.session));
             }
 
             let interactive_ahead = slot.waiting_interactive > 0;
@@ -361,7 +366,7 @@ impl Pool {
                         debug_assert!(n <= ceiling, "process FD count {n} above ceiling {ceiling}");
                     }
                 }
-                Ok(self.make_conn(key, stream, false))
+                Ok(self.make_conn(key, stream, false, None))
             }
             Err(e) => {
                 let mut g = self.lock();
@@ -374,8 +379,15 @@ impl Pool {
         }
     }
 
-    fn make_conn(&self, key: String, stream: TcpStream, reused: bool) -> Conn {
+    fn make_conn(
+        &self,
+        key: String,
+        stream: TcpStream,
+        reused: bool,
+        session: Option<Session>,
+    ) -> Conn {
         Conn {
+            session,
             pool: Arc::downgrade(&self.shared),
             key,
             stream: Some(stream),
@@ -537,9 +549,21 @@ pub struct Conn {
     total_timeout: Duration,
     io_timeout: Duration,
     reused: bool,
+    session: Option<Session>,
 }
 
 impl Conn {
+    /// Take the state stored with this socket by [`Conn::set_session`].
+    pub fn take_session(&mut self) -> Option<Session> {
+        self.session.take()
+    }
+
+    /// Keep `session` with the socket; it comes back on reuse and is
+    /// dropped with the socket on discard.
+    pub fn set_session(&mut self, session: Session) {
+        self.session = Some(session);
+    }
+
     pub fn stream(&mut self) -> &mut TcpStream {
         self.stream
             .as_mut()
@@ -598,6 +622,7 @@ impl Conn {
             .push(Idle {
                 stream,
                 since: Instant::now(),
+                session: self.session.take(),
             });
         drop(g);
         shared.cv.notify_all();

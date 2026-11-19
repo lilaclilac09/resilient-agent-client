@@ -34,8 +34,8 @@ for 20 s while a loopback CONNECT proxy is killed/restarted every 2 s and
 prints a JSON summary; it exits non-zero if a bound is broken. The fixture
 proxy only tunnels to loopback targets.
 
-Measured on 2026-11-19 (24 agents, 20 s, 6 proxy kills): 2,669 requests
-OK, 7,123 rejected locally while Open, 0 unexplained errors, 31 retries
+Measured on 2026-11-19 (24 agents, 20 s, 6 proxy kills): 2,940 requests
+OK, 7,123 rejected locally while Open, 0 unexplained errors, 41 retries
 (ceiling 150), peak 8 sockets per origin (cap 8), 59 sockets opened in
 total, recovery 509 ms after the proxy returned, process FDs 8 → 8. The
 FD peak (296) includes the in-process fixture proxy's own tunnel sockets.
@@ -52,13 +52,40 @@ What it proves, and what it is:
 
 | Check | Who does it | Result (2026-11-19, mihomo v1.19.34, sha256 matches the release digest) |
 |---|---|---|
-| 8 agents, HTTPS through `mixed-port` via `connection-pool` CONNECT + rustls, cert chain and `localhost` name validated | test client using the repo's pool (not an agent app) | 1,995 OK, 0 errors in 15 s, 535 TLS handshakes |
-| Independent client on mihomo's HTTP `port`, own CONNECT, one TLS session kept for the whole run | separate thread, no repo code | 64/64 requests, never disconnected |
+| 8 agents, HTTPS through `mixed-port` via `connection-pool` CONNECT + rustls, cert chain and `localhost` name validated | test client using the repo's pool (not an agent app) | 1,960 OK, 0 errors in 15 s, 535 TLS handshakes |
+| Independent client on mihomo's HTTP `port`, own CONNECT, one TLS session kept for the whole run | separate thread, no repo code | 63/63 requests, never disconnected |
 | `curl --proxy … --cacert …` | separate process | OK |
 | Untrusted CA / wrong server name | test client | both rejected |
 | Socket cap | pool | peak 8 per origin (cap 8) |
-| mihomo killed and restarted once under load | pool | 56 failed requests during the outage, recovered 3.3 s after restart, 0 sockets left open |
+| mihomo killed and restarted once under load | pool | 61 failed requests during the outage, recovered 3.3 s after restart, 0 sockets left open |
 
-Not verified here: a real agent app (Cursor or another IDE) wired to
-`agent-client`, SOCKS5 traffic, mihomo rule sets other than `DIRECT`, and
+### Public API phase (what a consumer actually calls)
+
+Same run, `agent_client::Client::get("https://localhost:…")` with
+`ProxyMode::Http(mixed-port)` and `Tls::only_ca_pem(sandbox CA)`. The
+client does its own TLS; nothing in the harness touches the socket.
+
+| Check | Result (2026-11-19) |
+|---|---|
+| 8 agents sharing one `Client`, 15 s | 1,968 verified HTTPS responses, 0 errors |
+| Keep-alive TLS reuse | 9 sockets opened, 1,960 requests on reused TLS sessions |
+| Independent client on HTTP `port`, held the whole phase | 63/63, never disconnected |
+| `examples/fetch.rs` as a separate process (`--proxy`, `--cacert`) | OK |
+| Default roots (sandbox CA not trusted) / `https://127.0.0.1` (name not in cert) | both `ClientError::Tls` |
+| Breaker after the phase | Closed |
+
+### Minimal consumer
+
+```rust
+use agent_client::{Client, ClientConfig};
+let client = Client::new(ClientConfig::default())?; // HTTPS_PROXY etc. + Mozilla roots
+let resp = client.get("https://api.example.com/v1/ping")?;
+```
+
+or `cargo run -p agent-client --example fetch -- <url> [--cacert ca.pem] [--proxy http://127.0.0.1:7890]`.
+With `ProxyMode::FromEnv` loopback hosts always go direct, so use
+`--proxy` / `ProxyMode::Http` to send loopback tests through mihomo.
+
+Not verified here: integration into any real agent app or IDE (Cursor or
+others; nothing is wired to `agent-client` outside this repo), SOCKS5 traffic, mihomo rule sets other than `DIRECT`, and
 real internet origins. Those need the owner's own machine and config.
