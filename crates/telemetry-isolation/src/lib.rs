@@ -255,8 +255,9 @@ struct BgState {
     telemetry: VecDeque<String>,
     last_flush: Instant,
     shutdown: bool,
-    /// Cooldown epoch already probed, per origin.
-    probed: std::collections::HashMap<String, u64>,
+    /// Per origin: (cooldown epoch, probes started in it, last probe
+    /// abandoned without a verdict).
+    probed: std::collections::HashMap<String, (u64, u32, bool)>,
 }
 
 struct BgShared {
@@ -474,6 +475,10 @@ impl Drop for Dispatcher {
     }
 }
 
+/// Tagged jobs tried per cooldown when each one gives its probe slot back
+/// without reaching the origin.
+const MAX_ABANDONED_PROBES: u32 = 3;
+
 /// While paused: the oldest queued job tagged with an origin whose
 /// breaker is Half-Open with a free probe slot, at most once per cooldown
 /// epoch. Never while offline or background is off, never opted-out
@@ -486,7 +491,10 @@ fn take_probe(gate: &Gate, st: &mut BgState) -> Option<(String, u64, Job)> {
         .breakers
         .probe_candidates()
         .into_iter()
-        .filter(|(o, e)| st.probed.get(o) != Some(e))
+        .filter(|(o, e)| match st.probed.get(o) {
+            Some(&(pe, tries, abandoned)) if pe == *e => abandoned && tries < MAX_ABANDONED_PROBES,
+            _ => true,
+        })
         .collect();
     if fresh.is_empty() {
         return None;
@@ -513,12 +521,27 @@ fn background_loop(config: DispatcherConfig, gate: Gate, bg: Arc<BgShared>, sink
         let has_work = !st.queue.is_empty() || !st.telemetry.is_empty();
         if has_work && !gate.background_allowed() {
             if let Some((origin, epoch, job)) = take_probe(&gate, &mut st) {
-                st.probed.insert(origin, epoch);
+                let tries = match st.probed.get(&origin) {
+                    Some(&(e, n, _)) if e == epoch => n + 1,
+                    _ => 1,
+                };
+                st.probed.insert(origin.clone(), (epoch, tries, false));
                 drop(st);
                 job();
                 bg.probes.fetch_add(1, Ordering::Relaxed);
                 bg.background_run.fetch_add(1, Ordering::Relaxed);
+                // Same cooldown and the slot is free again: the job never
+                // reached the origin (pool refusal, no request made).
+                let abandoned = gate
+                    .breakers
+                    .probe_candidates()
+                    .contains(&(origin.clone(), epoch));
                 st = bg.state.lock().unwrap_or_else(|e| e.into_inner());
+                if abandoned {
+                    if let Some(entry) = st.probed.get_mut(&origin) {
+                        entry.2 = true;
+                    }
+                }
                 continue;
             }
             bg.paused_checks.fetch_add(1, Ordering::Relaxed);
@@ -900,5 +923,34 @@ mod tests {
         ));
         assert_eq!(d.stats().background_probes, 1);
         assert_eq!(reg.state("bg-only"), State::Closed);
+    }
+
+    #[test]
+    fn abandoned_probe_lets_the_next_tagged_job_probe() {
+        let reg = registry();
+        let controls = Arc::new(Controls::default());
+        let d = fast_dispatcher(&controls, &reg);
+        tripped(&reg, "bg-only");
+        let ran = Arc::new(AtomicUsize::new(0));
+        let (r, n) = (reg.clone(), ran.clone());
+        d.submit_background_for(BackgroundKind::Polling, "bg-only", move || {
+            n.fetch_add(1, Ordering::SeqCst);
+            assert!(r.allow_request("bg-only"));
+            r.abandon("bg-only"); // e.g. the pool refused the checkout
+        })
+        .unwrap();
+        let succeed = Arc::new(AtomicBool::new(true));
+        d.submit_background_for(
+            BackgroundKind::Polling,
+            "bg-only",
+            probing_job(&reg, &ran, &succeed),
+        )
+        .unwrap();
+        assert!(wait_until(
+            || ran.load(Ordering::SeqCst) == 2,
+            Duration::from_secs(2)
+        ));
+        assert_eq!(reg.state("bg-only"), State::Closed);
+        assert_eq!(d.stats().background_probes, 2);
     }
 }
