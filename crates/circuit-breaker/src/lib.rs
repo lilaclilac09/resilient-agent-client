@@ -104,6 +104,7 @@ pub struct CircuitBreaker {
     probe_started: Option<Instant>,
     trips: u64,
     rejected: u64,
+    half_open_entries: u64,
     events: Vec<Transition>,
     rng_state: u64,
 }
@@ -125,6 +126,7 @@ impl CircuitBreaker {
             probe_started: None,
             trips: 0,
             rejected: 0,
+            half_open_entries: 0,
             events: Vec::new(),
             rng_state: seed | 1,
         };
@@ -213,6 +215,18 @@ impl CircuitBreaker {
         }
     }
 
+    /// Half-Open with its single probe slot still free.
+    pub fn probe_slot_free(&mut self) -> bool {
+        self.refresh();
+        self.state == State::HalfOpen && !self.probe_in_flight
+    }
+
+    /// How many times this breaker has entered Half-Open: identifies the
+    /// current cooldown, so a caller can allow one probe per cooldown.
+    pub fn cooldown_epoch(&self) -> u64 {
+        self.half_open_entries
+    }
+
     /// Consecutive counted failures since the last success (Closed only).
     pub fn consecutive_failures(&self) -> u32 {
         self.consecutive_failures
@@ -265,6 +279,9 @@ impl CircuitBreaker {
         let from = self.state;
         if to == State::Open {
             self.opened_at = Some(Instant::now());
+        }
+        if to == State::HalfOpen {
+            self.half_open_entries += 1;
         }
         self.state = to;
         self.events.push(Transition {
@@ -380,6 +397,25 @@ impl Registry {
             }
         }
         all
+    }
+
+    /// Origins whose breaker is Half-Open with the probe slot free, with
+    /// their cooldown epoch ([`CircuitBreaker::cooldown_epoch`]).
+    pub fn probe_candidates(&self) -> Vec<(String, u64)> {
+        let mut map = self.breakers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::new();
+        for (origin, b) in map.iter_mut() {
+            let before = b.events.len();
+            if b.probe_slot_free() {
+                out.push((origin.clone(), b.cooldown_epoch()));
+            }
+            if let Some(obs) = &self.observer {
+                for t in &b.events[before..] {
+                    obs(origin, t);
+                }
+            }
+        }
+        out
     }
 
     /// `(origin, state, trips, rejected)` for every known origin.

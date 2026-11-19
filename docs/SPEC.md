@@ -183,6 +183,7 @@ resilient-agent-client/
   budget or counting toward the breaker.
 - **Hardening from review**: proxy variables that are set but unsupported make `Client::new` fail instead of dialling direct; response head lines are capped at 8 KiB and 100 headers; every read is bounded by the total deadline; HEAD/1xx/204/304 have no body; stale-socket replays only for idempotent requests; proxy 407 is not a network failure; queued telemetry is dropped on opt-out; background never takes an idle socket ahead of a waiting interactive request.
 - **Retry budget counts attempts** (§4.2): every outbound retry spends a token — scheduled, coalesced onto another request's schedule, or an immediate stale-socket replay — so at most 10 retries leave the client per origin per 60 s however many callers fail at once. Coalescing shares the wait and the backoff step, not the budget.
+- **Background cooldown probe** (§4.4): background work stays paused while any breaker is not Closed, but a job submitted with `Dispatcher::submit_background_for(kind, origin, job)` may run as that origin's single Half-Open probe, at most once per cooldown (breaker `cooldown_epoch`). Never while offline, with background disabled, or for opted-out telemetry. Untagged jobs never probe. This lets an origin that only background traffic uses recover without interactive traffic.
 - **Shared client**: one `agent_client::Client` per process, so the caps
   in §4.1 bound all agents together.
 

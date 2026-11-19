@@ -98,7 +98,7 @@ pub type Job = Box<dyn FnOnce() + Send + 'static>;
 /// Bounded queue that evicts the lowest-priority, oldest job on overflow.
 pub struct BackgroundQueue {
     capacity: usize,
-    jobs: VecDeque<(BackgroundKind, Job)>,
+    jobs: VecDeque<(BackgroundKind, Option<String>, Job)>,
     dropped: u64,
 }
 
@@ -113,13 +113,19 @@ impl BackgroundQueue {
 
     /// Enqueue; returns false when the job itself was dropped.
     pub fn push(&mut self, kind: BackgroundKind, job: Job) -> bool {
+        self.push_for(kind, None, job)
+    }
+
+    /// Enqueue a job that talks to `origin`, so it can serve as that
+    /// origin's cooldown probe.
+    pub fn push_for(&mut self, kind: BackgroundKind, origin: Option<String>, job: Job) -> bool {
         if self.jobs.len() >= self.capacity {
             let victim = self
                 .jobs
                 .iter()
                 .enumerate()
-                .min_by_key(|(i, (k, _))| (*k, *i))
-                .map(|(i, (k, _))| (i, *k));
+                .min_by_key(|(i, (k, _, _))| (*k, *i))
+                .map(|(i, (k, _, _))| (i, *k));
             match victim {
                 Some((i, k)) if k <= kind => {
                     self.jobs.remove(i);
@@ -131,12 +137,25 @@ impl BackgroundQueue {
                 }
             }
         }
-        self.jobs.push_back((kind, job));
+        self.jobs.push_back((kind, origin, job));
         true
     }
 
     pub fn pop(&mut self) -> Option<(BackgroundKind, Job)> {
-        self.jobs.pop_front()
+        self.jobs.pop_front().map(|(k, _, j)| (k, j))
+    }
+
+    /// Remove the oldest origin-tagged job matching `pred`.
+    pub fn pop_for(
+        &mut self,
+        pred: impl Fn(BackgroundKind, &str) -> bool,
+    ) -> Option<(BackgroundKind, String, Job)> {
+        let i = self
+            .jobs
+            .iter()
+            .position(|(k, o, _)| o.as_deref().is_some_and(|o| pred(*k, o)))?;
+        let (k, o, j) = self.jobs.remove(i)?;
+        Some((k, o.expect("tagged"), j))
     }
     pub fn len(&self) -> usize {
         self.jobs.len()
@@ -225,6 +244,8 @@ pub struct DispatcherStats {
     pub telemetry_events_dropped: u64,
     /// Times the background worker found the gate closed with work waiting.
     pub paused_checks: u64,
+    /// Origin-tagged jobs run as a cooldown probe while paused.
+    pub background_probes: u64,
 }
 
 type TelemetrySink = Arc<dyn Fn(Vec<String>) + Send + Sync>;
@@ -234,6 +255,8 @@ struct BgState {
     telemetry: VecDeque<String>,
     last_flush: Instant,
     shutdown: bool,
+    /// Cooldown epoch already probed, per origin.
+    probed: std::collections::HashMap<String, u64>,
 }
 
 struct BgShared {
@@ -244,6 +267,7 @@ struct BgShared {
     telemetry_flushed: AtomicU64,
     telemetry_dropped: AtomicU64,
     paused_checks: AtomicU64,
+    probes: AtomicU64,
 }
 
 /// Runs interactive and background work on isolated workers.
@@ -294,6 +318,7 @@ impl Dispatcher {
                 telemetry: VecDeque::new(),
                 last_flush: Instant::now(),
                 shutdown: false,
+                probed: Default::default(),
             }),
             cv: Condvar::new(),
             background_run: AtomicU64::new(0),
@@ -301,6 +326,7 @@ impl Dispatcher {
             telemetry_flushed: AtomicU64::new(0),
             telemetry_dropped: AtomicU64::new(0),
             paused_checks: AtomicU64::new(0),
+            probes: AtomicU64::new(0),
         });
         {
             let bg = bg.clone();
@@ -346,6 +372,28 @@ impl Dispatcher {
         kind: BackgroundKind,
         job: impl FnOnce() + Send + 'static,
     ) -> Result<(), Rejected> {
+        self.submit(kind, None, Box::new(job))
+    }
+
+    /// Like [`Dispatcher::submit_background`] for a job whose requests go
+    /// to `origin`. While paused, it may run as that origin's single
+    /// cooldown probe (see SPEC §6.1), which is how a background-only
+    /// origin's breaker gets back to Closed.
+    pub fn submit_background_for(
+        &self,
+        kind: BackgroundKind,
+        origin: &str,
+        job: impl FnOnce() + Send + 'static,
+    ) -> Result<(), Rejected> {
+        self.submit(kind, Some(origin.to_string()), Box::new(job))
+    }
+
+    fn submit(
+        &self,
+        kind: BackgroundKind,
+        origin: Option<String>,
+        job: Job,
+    ) -> Result<(), Rejected> {
         if !self.gate.controls.background_enabled() {
             return Err(Rejected::BackgroundDisabled);
         }
@@ -356,7 +404,7 @@ impl Dispatcher {
         if st.shutdown {
             return Err(Rejected::ShutDown);
         }
-        let ok = st.queue.push(kind, Box::new(job));
+        let ok = st.queue.push_for(kind, origin, job);
         drop(st);
         self.bg.cv.notify_all();
         if ok {
@@ -403,6 +451,7 @@ impl Dispatcher {
             telemetry_events_flushed: self.bg.telemetry_flushed.load(Ordering::Relaxed),
             telemetry_events_dropped: self.bg.telemetry_dropped.load(Ordering::Relaxed),
             paused_checks: self.bg.paused_checks.load(Ordering::Relaxed),
+            background_probes: self.bg.probes.load(Ordering::Relaxed),
         }
     }
 }
@@ -425,6 +474,31 @@ impl Drop for Dispatcher {
     }
 }
 
+/// While paused: the oldest queued job tagged with an origin whose
+/// breaker is Half-Open with a free probe slot, at most once per cooldown
+/// epoch. Never while offline or background is off, never opted-out
+/// telemetry.
+fn take_probe(gate: &Gate, st: &mut BgState) -> Option<(String, u64, Job)> {
+    if !gate.controls.background_enabled() || gate.controls.offline() {
+        return None;
+    }
+    let fresh: Vec<(String, u64)> = gate
+        .breakers
+        .probe_candidates()
+        .into_iter()
+        .filter(|(o, e)| st.probed.get(o) != Some(e))
+        .collect();
+    if fresh.is_empty() {
+        return None;
+    }
+    let telemetry_on = gate.controls.telemetry_enabled();
+    let (_, origin, job) = st.queue.pop_for(|k, o| {
+        (k != BackgroundKind::Telemetry || telemetry_on) && fresh.iter().any(|(f, _)| f == o)
+    })?;
+    let epoch = fresh.iter().find(|(f, _)| *f == origin)?.1;
+    Some((origin, epoch, job))
+}
+
 fn background_loop(config: DispatcherConfig, gate: Gate, bg: Arc<BgShared>, sink: TelemetrySink) {
     let mut st = bg.state.lock().unwrap_or_else(|e| e.into_inner());
     loop {
@@ -438,6 +512,15 @@ fn background_loop(config: DispatcherConfig, gate: Gate, bg: Arc<BgShared>, sink
         }
         let has_work = !st.queue.is_empty() || !st.telemetry.is_empty();
         if has_work && !gate.background_allowed() {
+            if let Some((origin, epoch, job)) = take_probe(&gate, &mut st) {
+                st.probed.insert(origin, epoch);
+                drop(st);
+                job();
+                bg.probes.fetch_add(1, Ordering::Relaxed);
+                bg.background_run.fetch_add(1, Ordering::Relaxed);
+                st = bg.state.lock().unwrap_or_else(|e| e.into_inner());
+                continue;
+            }
             bg.paused_checks.fetch_add(1, Ordering::Relaxed);
             st = bg
                 .cv
@@ -488,7 +571,7 @@ fn background_loop(config: DispatcherConfig, gate: Gate, bg: Arc<BgShared>, sink
 #[cfg(test)]
 mod tests {
     use super::*;
-    use circuit_breaker::{Config, Outcome};
+    use circuit_breaker::{Config, Outcome, State};
     use std::sync::atomic::AtomicUsize;
 
     fn registry() -> Arc<Registry> {
@@ -689,5 +772,133 @@ mod tests {
         controls.set_telemetry_enabled(false);
         std::thread::sleep(Duration::from_millis(250));
         assert_eq!(batches.lock().unwrap().len(), 1, "opt-out flushed nothing");
+    }
+
+    fn tripped(reg: &Registry, origin: &str) {
+        for _ in 0..5 {
+            assert!(reg.allow_request(origin));
+            reg.record(origin, Outcome::NetworkError);
+        }
+        assert_eq!(reg.state(origin), State::Open);
+    }
+
+    fn probing_job(
+        reg: &Arc<Registry>,
+        ran: &Arc<AtomicUsize>,
+        succeed: &Arc<AtomicBool>,
+    ) -> impl FnOnce() + Send + 'static {
+        let (reg, ran, succeed) = (reg.clone(), ran.clone(), succeed.clone());
+        move || {
+            ran.fetch_add(1, Ordering::SeqCst);
+            if reg.allow_request("bg-only") {
+                let ok = succeed.load(Ordering::SeqCst);
+                reg.record(
+                    "bg-only",
+                    if ok {
+                        Outcome::Success
+                    } else {
+                        Outcome::NetworkError
+                    },
+                );
+            }
+        }
+    }
+
+    fn fast_dispatcher(controls: &Arc<Controls>, reg: &Arc<Registry>) -> Dispatcher {
+        Dispatcher::new(
+            DispatcherConfig {
+                gate_poll: Duration::from_millis(10),
+                ..Default::default()
+            },
+            Gate {
+                controls: controls.clone(),
+                breakers: reg.clone(),
+            },
+            |_| {},
+        )
+    }
+
+    #[test]
+    fn background_only_origin_gets_one_probe_per_cooldown() {
+        let reg = registry();
+        let controls = Arc::new(Controls::default());
+        let d = fast_dispatcher(&controls, &reg);
+        tripped(&reg, "bg-only");
+        let ran = Arc::new(AtomicUsize::new(0));
+        let succeed = Arc::new(AtomicBool::new(false));
+        for _ in 0..3 {
+            d.submit_background_for(
+                BackgroundKind::Polling,
+                "bg-only",
+                probing_job(&reg, &ran, &succeed),
+            )
+            .unwrap();
+        }
+        assert!(wait_until(
+            || ran.load(Ordering::SeqCst) == 1,
+            Duration::from_secs(2)
+        ));
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            1,
+            "more than one probe in one cooldown"
+        );
+        assert_eq!(reg.state("bg-only"), State::Open, "failed probe re-opens");
+        succeed.store(true, Ordering::SeqCst);
+        assert!(wait_until(
+            || ran.load(Ordering::SeqCst) == 3,
+            Duration::from_secs(3)
+        ));
+        assert_eq!(reg.state("bg-only"), State::Closed);
+        assert_eq!(d.stats().background_probes, 2);
+    }
+
+    #[test]
+    fn no_probe_while_offline_disabled_or_opted_out() {
+        let reg = registry();
+        let controls = Arc::new(Controls::default());
+        let d = fast_dispatcher(&controls, &reg);
+        tripped(&reg, "bg-only");
+        let ran = Arc::new(AtomicUsize::new(0));
+        let succeed = Arc::new(AtomicBool::new(true));
+        d.submit_background_for(
+            BackgroundKind::Telemetry,
+            "bg-only",
+            probing_job(&reg, &ran, &succeed),
+        )
+        .unwrap();
+        controls.set_telemetry_enabled(false);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "opted-out telemetry used as probe"
+        );
+        d.submit_background_for(
+            BackgroundKind::Polling,
+            "bg-only",
+            probing_job(&reg, &ran, &succeed),
+        )
+        .unwrap();
+        controls.set_offline(true);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "probed while offline");
+        controls.set_offline(false);
+        controls.set_background_enabled(false);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "probed while background disabled"
+        );
+        assert_eq!(reg.state("bg-only"), State::HalfOpen);
+        controls.set_background_enabled(true);
+        assert!(wait_until(
+            || ran.load(Ordering::SeqCst) == 1,
+            Duration::from_secs(2)
+        ));
+        assert_eq!(d.stats().background_probes, 1);
+        assert_eq!(reg.state("bg-only"), State::Closed);
     }
 }
