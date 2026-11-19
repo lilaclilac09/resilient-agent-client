@@ -34,12 +34,14 @@ for 20 s while a loopback CONNECT proxy is killed/restarted every 2 s and
 prints a JSON summary; it exits non-zero if a bound is broken. The fixture
 proxy only tunnels to loopback targets.
 
-Measured on 2026-11-19 (24 agents, 20 s, 6 proxy kills): 2,940 requests
-OK, 6,022 rejected locally while Open, 0 unexplained errors, 41 retry
-attempts (ceiling 150, every coalesced and immediate retry counted), peak
-8 sockets per origin (cap 8), 99 sockets opened in total, recovery 452 ms
-after the proxy returned, process FDs 8 → 8. The FD peak (296) includes
-the in-process fixture proxy's own tunnel sockets.
+Measured on 2026-11-19 (24 agents, 20 s, 6 proxy kills): 2,391 requests
+OK, 6,641 rejected locally while Open, 69 failed fast with "retry budget
+exhausted" (stale keep-alive tunnels after a kill no longer trip the
+breaker, so callers hit the budget instead), 65 retry attempts (ceiling
+150, coalesced and immediate retries included), peak 8 sockets per origin
+(cap 8), 83 sockets opened, recovery 618 ms after the proxy returned,
+process FDs 8 → 8. The FD peak (296) includes the in-process fixture
+proxy's own tunnel sockets.
 
 ## Real mihomo test (`harness/mihomo-e2e`)
 
@@ -68,8 +70,8 @@ client does its own TLS; nothing in the harness touches the socket.
 
 | Check | Result (2026-11-19) |
 |---|---|
-| 8 agents sharing one `Client`, 15 s | 1,968 verified HTTPS responses, 0 errors |
-| Keep-alive TLS reuse | 9 sockets opened, 1,960 requests on reused TLS sessions |
+| 8 agents sharing one `Client`, 15 s | 2,017 verified HTTPS responses, 0 errors |
+| Keep-alive TLS reuse | 9 sockets opened, 2,009 requests on reused TLS sessions |
 | Independent client on HTTP `port`, held the whole phase | 63/63, never disconnected |
 | `examples/fetch.rs` as a separate process (`--proxy`, `--cacert`) | OK |
 | Default roots (sandbox CA not trusted) / `https://127.0.0.1` (name not in cert) | both `ClientError::Tls` |

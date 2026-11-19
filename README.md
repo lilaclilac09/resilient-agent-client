@@ -79,7 +79,7 @@ resilient-agent-client/
 All four modules are implemented and composed in `crates/agent-client`
 (one `Client` shared by every agent in a process, optionally through a
 local HTTP proxy such as mihomo via `HTTPS_PROXY`). `cargo test
---workspace`: 55 tests, loopback fixtures only.
+--workspace`: 58 tests, loopback fixtures only.
 
 Measured 2026-11-19:
 
@@ -88,13 +88,13 @@ Measured 2026-11-19:
   10 → 11 max → 11 final, final state Closed.
 - `cargo run --release -p multi-agent-proxy -- 24 20 2000` (24 agents,
   one shared client, loopback CONNECT proxy killed 6 times): peak 8
-  sockets per origin (cap 8), 41 retry attempts (ceiling 150), 6,022 local
-  rejections while Open, recovery 452 ms after the proxy returned,
+  sockets per origin (cap 8), 65 retry attempts (ceiling 150), 6,641 local
+  rejections while Open, recovery 618 ms after the proxy returned,
   process FDs 8 → 8.
 
 - `harness/mihomo/run-mihomo-e2e.sh` (real mihomo v1.19.34, loopback):
   8 agents made 1,960 certificate-validated HTTPS requests through
-  `mixed-port` with 0 errors via the raw pool and 1,968 via the public
+  `mixed-port` with 0 errors via the raw pool and 2,017 via the public
   `Client::get("https://…")` API (keep-alive TLS: 9 sockets); an
   independent client on the HTTP port stayed connected; `examples/fetch.rs`
   worked as a separate process; untrusted CA and wrong name rejected.
