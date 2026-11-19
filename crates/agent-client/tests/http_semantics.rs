@@ -76,3 +76,24 @@ fn urls_parse_into_scheme_origin_and_path() {
         assert!(parse_url(bad).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn crlf_in_url_or_method_is_rejected_before_any_socket() {
+    let c = Client::new(test_config(ProxyMode::Direct)).unwrap();
+    for url in [
+        "http://127.0.0.1:9/a\r\nX-Injected: 1",
+        "http://127.0.0.1:9/a b",
+    ] {
+        assert!(
+            matches!(c.get(url), Err(ClientError::InvalidUrl(_))),
+            "{url:?}"
+        );
+    }
+    let mut req = Request::get("/");
+    req.method = "GET /x HTTP/1.1\r\nHost: evil\r\n\r\nGET".into();
+    assert!(matches!(
+        c.send(&Origin::new("127.0.0.1", 9), &req),
+        Err(ClientError::InvalidUrl(_))
+    ));
+    assert_eq!(c.pool().stats().opened, 0);
+}

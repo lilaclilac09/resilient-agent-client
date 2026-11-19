@@ -358,6 +358,13 @@ impl Client {
         origin: &Origin,
         req: &Request,
     ) -> Result<Response, ClientError> {
+        let unsafe_token = |s: &str| s.is_empty() || s.bytes().any(|b| b <= b' ' || b == 0x7f);
+        if unsafe_token(&req.method) || unsafe_token(&req.path) || unsafe_token(&origin.host) {
+            return Err(ClientError::InvalidUrl(format!(
+                "control characters or spaces in method, path or host: {:?} {:?} {:?}",
+                req.method, req.path, origin.host
+            )));
+        }
         let key = origin.key();
         let idempotent = req.is_idempotent();
         let mut attempts = 0u32;
