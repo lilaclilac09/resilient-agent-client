@@ -72,6 +72,13 @@ fn urls_parse_into_scheme_origin_and_path() {
     let (s, o, p) = parse_url("http://example.test").unwrap();
     assert_eq!((s, o.port, p.as_str()), (Scheme::Http, 80, "/"));
     assert_eq!(parse_url("https://h.test").unwrap().1.port, 443);
+    let (_, o, p) = parse_url("https://example.com?x=1#frag").unwrap();
+    assert_eq!(
+        (o.key(), p.as_str()),
+        ("example.com:443".to_string(), "/?x=1")
+    );
+    let (_, o, p) = parse_url("http://h.test:8080/a?b#c").unwrap();
+    assert_eq!((o.port, p.as_str()), (8080, "/a?b"));
     for bad in ["ftp://h/", "https://user:pw@h/", "https://", "https://h:x/"] {
         assert!(parse_url(bad).is_err(), "{bad}");
     }

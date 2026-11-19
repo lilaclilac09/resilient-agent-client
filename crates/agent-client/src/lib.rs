@@ -100,8 +100,10 @@ pub fn parse_url(url: &str) -> Result<(Scheme, Origin, String), ClientError> {
     } else {
         return Err(bad());
     };
-    let (authority, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], rest[i..].to_string()),
+    let rest = rest.split('#').next().unwrap_or_default();
+    let (authority, path) = match rest.find(['/', '?']) {
+        Some(i) if rest[i..].starts_with('/') => (&rest[..i], rest[i..].to_string()),
+        Some(i) => (&rest[..i], format!("/{}", &rest[i..])),
         None => (rest, "/".to_string()),
     };
     if authority.is_empty() || authority.contains('@') {
