@@ -180,7 +180,8 @@ pub enum FailFast {
 pub enum Decision {
     /// Wait `after`, then retry. `coalesced` is true when the request
     /// joined a reconnect schedule another in-flight request already
-    /// created (no budget spent, backoff not advanced).
+    /// created (backoff not advanced; one budget token still spent,
+    /// since it is one more outbound attempt).
     Retry {
         after: Duration,
         coalesced: bool,
@@ -193,9 +194,18 @@ pub enum Decision {
 pub struct RetryStats {
     pub scheduled: u64,
     pub coalesced: u64,
+    /// Immediate (no-backoff) retries, e.g. stale keep-alive replays.
+    pub immediate: u64,
     pub budget_exhausted: u64,
     pub non_idempotent: u64,
     pub successes: u64,
+}
+
+impl RetryStats {
+    /// Outbound retry attempts authorised; never above the budget.
+    pub fn attempts(&self) -> u64 {
+        self.scheduled + self.coalesced + self.immediate
+    }
 }
 
 struct OriginRetry {
@@ -244,6 +254,14 @@ impl RetryCoordinator {
                 o.stats.non_idempotent += 1;
                 return Decision::FailFast(FailFast::NonIdempotent);
             }
+            // Every outbound retry spends a token, coalesced or not, so the
+            // budget bounds real attempts per origin (SPEC §4.2).
+            if !o.budget.try_spend(now) {
+                o.stats.budget_exhausted += 1;
+                return Decision::FailFast(FailFast::BudgetExhausted {
+                    refill_in: o.budget.refill_in(now),
+                });
+            }
             if let Some(t) = o.next_attempt {
                 if t > now {
                     o.stats.coalesced += 1;
@@ -253,18 +271,27 @@ impl RetryCoordinator {
                     };
                 }
             }
-            if !o.budget.try_spend(now) {
-                o.stats.budget_exhausted += 1;
-                return Decision::FailFast(FailFast::BudgetExhausted {
-                    refill_in: o.budget.refill_in(now),
-                });
-            }
             let after = o.jitter.next_delay();
             o.next_attempt = Some(now + after);
             o.stats.scheduled += 1;
             Decision::Retry {
                 after,
                 coalesced: false,
+            }
+        })
+    }
+
+    /// Spend one token for an immediate retry that has no backoff (a
+    /// replay on a fresh socket after a stale keep-alive one). False when
+    /// the budget is spent: the caller must fail instead of retrying.
+    pub fn try_spend_immediate(&self, origin: &str, now: Instant) -> bool {
+        self.with_origin(origin, |o| {
+            if o.budget.try_spend(now) {
+                o.stats.immediate += 1;
+                true
+            } else {
+                o.stats.budget_exhausted += 1;
+                false
             }
         })
     }
@@ -388,23 +415,44 @@ mod tests {
             panic!("expected retry, got {first:?}")
         };
         assert!(!coalesced);
+        let (mut joined, mut refused) = (0, 0);
         for i in 1..50u64 {
             let t = now + Duration::from_millis(i % 5);
             match c.on_failure("o", true, t) {
                 Decision::Retry {
                     after: a,
                     coalesced: true,
-                } => assert!(a <= after),
-                other => panic!("request {i} not coalesced: {other:?}"),
+                } => {
+                    assert!(a <= after, "coalesced wait beyond the shared schedule");
+                    joined += 1;
+                }
+                Decision::FailFast(FailFast::BudgetExhausted { .. }) => refused += 1,
+                other => panic!("request {i}: {other:?}"),
             }
         }
         assert_eq!(
-            c.remaining_budget("o", now),
-            9,
-            "coalesced requests spent budget"
+            (joined, refused),
+            (9, 40),
+            "each coalesced retry spends a token"
         );
-        assert_eq!(c.stats("o").scheduled, 1);
-        assert_eq!(c.stats("o").coalesced, 49);
+        assert_eq!(c.remaining_budget("o", now), 0);
+        let s = c.stats("o");
+        assert_eq!((s.scheduled, s.coalesced, s.attempts()), (1, 9, 10));
+    }
+
+    #[test]
+    fn immediate_retries_share_the_budget() {
+        let c = RetryCoordinator::new(RetryConfig::default());
+        let now = Instant::now();
+        for _ in 0..10 {
+            assert!(c.try_spend_immediate("o", now));
+        }
+        assert!(!c.try_spend_immediate("o", now));
+        assert!(matches!(
+            c.on_failure("o", true, now),
+            Decision::FailFast(FailFast::BudgetExhausted { .. })
+        ));
+        assert_eq!(c.stats("o").attempts(), 10);
     }
 
     #[test]

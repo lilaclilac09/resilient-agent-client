@@ -225,3 +225,49 @@ fn fixture_proxy_refuses_non_loopback_targets() {
         .is_err());
     assert_eq!(proxy.refused_targets(), 1);
 }
+
+#[test]
+fn concurrent_retries_never_exceed_the_per_origin_budget() {
+    // Upstream that accepts and immediately closes: every attempt is a
+    // real outbound connection and a network failure.
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let accepted = Arc::new(AtomicU64::new(0));
+    let a = accepted.clone();
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            a.fetch_add(1, Ordering::SeqCst);
+            drop(s);
+        }
+    });
+    let mut cfg = test_config(ProxyMode::Direct);
+    cfg.breaker.failure_threshold = 10_000; // isolate the budget from the breaker
+    cfg.max_attempts = 5;
+    cfg.retry.budget.window = Duration::from_secs(60);
+    cfg.retry.backoff = retry_budget_cfg();
+    let c = Arc::new(Client::new(cfg).unwrap());
+    let o = Origin::new("127.0.0.1", port);
+    let callers = 20u64;
+    let hs: Vec<_> = (0..callers)
+        .map(|_| {
+            let (c, o) = (c.clone(), o.clone());
+            std::thread::spawn(move || c.send(&o, &Request::get("/")).is_err())
+        })
+        .collect();
+    assert!(hs.into_iter().all(|h| h.join().unwrap()));
+    std::thread::sleep(Duration::from_millis(100));
+    let retries = c.retries().stats(&o.key()).attempts();
+    assert!(retries <= 10, "{retries} retries authorised");
+    let outbound = accepted.load(Ordering::SeqCst);
+    assert!(
+        outbound <= callers + 10,
+        "{outbound} outbound attempts for {callers} requests"
+    );
+}
+
+fn retry_budget_cfg() -> BackoffConfig {
+    BackoffConfig {
+        base: Duration::from_millis(10),
+        cap: Duration::from_millis(50),
+    }
+}

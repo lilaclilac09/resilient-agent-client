@@ -11,7 +11,9 @@ pub use connection_pool::proxy::{HttpConnectProxy, NoProxy};
 pub use connection_pool::{
     Connector, DirectConnector, Origin, Pool, PoolConfig, PoolError, Priority,
 };
-pub use retry_budget::{Decision, FailFast, RetryConfig, RetryCoordinator};
+pub use retry_budget::{
+    BackoffConfig, BudgetConfig, Decision, FailFast, RetryConfig, RetryCoordinator, RetryStats,
+};
 pub use telemetry_isolation as isolation;
 
 use std::fmt;
@@ -270,10 +272,12 @@ impl Client {
                 Err(Fail::Stale(_))
                     if reused
                         && idempotent
-                        && stale_retries < self.pool.config().max_per_origin =>
+                        && stale_retries < self.pool.config().max_per_origin
+                        && self.retries.try_spend_immediate(&key, Instant::now()) =>
                 {
                     // A pooled keep-alive socket the peer already closed:
-                    // retry once on a fresh socket without counting it.
+                    // replay at once on another socket. Spends a retry
+                    // token but does not count toward the breaker.
                     conn.discard();
                     stale_retries += 1;
                     attempts -= 1;

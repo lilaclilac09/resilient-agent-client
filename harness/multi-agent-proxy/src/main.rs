@@ -154,7 +154,7 @@ fn main() {
     let retry_ceiling = retry_budget_max * origins.len() as u64 * (secs / window_secs + 1);
     let retries: u64 = origins
         .iter()
-        .map(|o| client.retries().stats(&o.key()).scheduled)
+        .map(|o| client.retries().stats(&o.key()).attempts())
         .sum();
 
     println!(

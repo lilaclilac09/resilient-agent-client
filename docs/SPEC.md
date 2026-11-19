@@ -182,6 +182,7 @@ resilient-agent-client/
   response byte is retried once on a fresh socket without spending retry
   budget or counting toward the breaker.
 - **Hardening from review**: proxy variables that are set but unsupported make `Client::new` fail instead of dialling direct; response head lines are capped at 8 KiB and 100 headers; every read is bounded by the total deadline; HEAD/1xx/204/304 have no body; stale-socket replays only for idempotent requests; proxy 407 is not a network failure; queued telemetry is dropped on opt-out; background never takes an idle socket ahead of a waiting interactive request.
+- **Retry budget counts attempts** (§4.2): every outbound retry spends a token — scheduled, coalesced onto another request's schedule, or an immediate stale-socket replay — so at most 10 retries leave the client per origin per 60 s however many callers fail at once. Coalescing shares the wait and the backoff step, not the budget.
 - **Shared client**: one `agent_client::Client` per process, so the caps
   in §4.1 bound all agents together.
 
