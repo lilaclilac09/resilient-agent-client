@@ -10,4 +10,5 @@ members = [
     "harness/fault-server",
     "harness/loopback-fixtures",
     "harness/multi-agent-proxy",
+    "harness/mihomo-e2e",
 ]

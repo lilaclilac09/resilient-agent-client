@@ -157,7 +157,9 @@ resilient-agent-client/
 │   ├── fault-server/         # loopback server killed/restarted on a timer
 │   ├── fd-monitor/           # external /proc + lsof FD sampling
 │   ├── loopback-fixtures/    # keep-alive upstreams + flappable loopback CONNECT proxy
-│   └── multi-agent-proxy/    # N agents through one flapping proxy, checks §5 bounds
+│   ├── multi-agent-proxy/    # N agents through one flapping proxy, checks §5 bounds
+│   ├── mihomo-e2e/           # validated HTTPS through a real mihomo process on loopback
+│   └── mihomo/               # run-mihomo-e2e.sh
 ├── docs/
 │   ├── SPEC.md
 │   ├── PROVENANCE.md         # rule → source → code → test, reference ratings
@@ -179,6 +181,7 @@ resilient-agent-client/
 - **Stale keep-alive retry**: a pooled socket that fails before any
   response byte is retried once on a fresh socket without spending retry
   budget or counting toward the breaker.
+- **Hardening from review**: proxy variables that are set but unsupported make `Client::new` fail instead of dialling direct; response head lines are capped at 8 KiB and 100 headers; every read is bounded by the total deadline; HEAD/1xx/204/304 have no body; stale-socket replays only for idempotent requests; proxy 407 is not a network failure; queued telemetry is dropped on opt-out; background never takes an idle socket ahead of a waiting interactive request.
 - **Shared client**: one `agent_client::Client` per process, so the caps
   in §4.1 bound all agents together.
 
