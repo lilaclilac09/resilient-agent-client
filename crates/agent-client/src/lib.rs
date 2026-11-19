@@ -563,7 +563,14 @@ fn classify(e: io::Error, got_bytes: bool) -> Fail {
         Fail::Tls(e)
     } else if !is_network_error(&e) {
         Fail::Protocol(e)
-    } else if got_bytes {
+    } else if got_bytes
+        || matches!(
+            e.kind(),
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+        )
+    {
+        // A timeout means the peer is hung, not that it closed an idle
+        // keep-alive socket: it always counts as a network failure.
         Fail::Network(e)
     } else {
         Fail::Stale(e)

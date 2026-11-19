@@ -135,3 +135,25 @@ fn stale_keep_alive_closes_never_open_the_breaker() {
     }
     assert_eq!(c.breakers().state(&o.key()), State::Closed);
 }
+
+#[test]
+fn timeout_on_a_reused_socket_counts_as_a_network_failure() {
+    // Answers the first request, then holds the socket open silently.
+    let o = scripted(vec!["HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"]);
+    let mut cfg = test_config(ProxyMode::Direct);
+    cfg.pool.io_timeout = Duration::from_millis(200);
+    cfg.max_attempts = 1;
+    cfg.breaker.failure_threshold = 1;
+    let c = Client::new(cfg).unwrap();
+    c.send(&o, &Request::get("/")).unwrap();
+    match c.send(&o, &Request::post("/rpc", "x")) {
+        Err(ClientError::Network { attempts: 1, .. }) => {}
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(c.pool().stats().reused, 1);
+    assert_eq!(
+        c.breakers().state(&o.key()),
+        State::Open,
+        "timeout was not counted"
+    );
+}
