@@ -428,30 +428,68 @@ fn exchange(
         deadline,
         io: io_timeout,
     });
-    let mut line = String::new();
-    match read_head_line(&mut r, &mut line) {
-        Ok(0) => {
-            return Err(Fail::Stale(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "closed before response",
-            )))
+    // RFC 9110 §15.2: skip interim 1xx responses (e.g. 103 Early Hints)
+    // and read the final one.
+    let mut interim = 0;
+    let status = loop {
+        let mut line = String::new();
+        match read_head_line(&mut r, &mut line) {
+            Ok(0) if interim == 0 => {
+                return Err(Fail::Stale(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "closed before response",
+                )))
+            }
+            Ok(0) => {
+                return Err(Fail::Network(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "closed after interim response",
+                )))
+            }
+            Ok(_) => {}
+            Err(e) => return Err(classify(e, interim > 0)),
         }
-        Ok(_) => {}
-        Err(e) => return Err(classify(e, false)),
-    }
-    let status: u16 = line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|c| c.parse().ok())
-        .ok_or_else(|| {
-            Fail::Protocol(io::Error::new(
+        let status: u16 = line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|c| c.parse().ok())
+            .ok_or_else(|| {
+                Fail::Protocol(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bad status line",
+                ))
+            })?;
+        if !(100..200).contains(&status) {
+            break status;
+        }
+        if status == 101 || interim >= 8 {
+            return Err(Fail::Protocol(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "bad status line",
-            ))
-        })?;
-    // RFC 9110 §6.3: no body for HEAD, 1xx, 204, 304.
-    let no_body =
-        req.method == "HEAD" || (100..200).contains(&status) || status == 204 || status == 304;
+                "unsupported interim response",
+            )));
+        }
+        interim += 1;
+        for i in 0..=MAX_HEADERS {
+            let mut h = String::new();
+            if read_head_line(&mut r, &mut h).map_err(|e| classify(e, true))? == 0 {
+                return Err(Fail::Network(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "closed in interim headers",
+                )));
+            }
+            if h == "\r\n" || h == "\n" {
+                break;
+            }
+            if i == MAX_HEADERS {
+                return Err(Fail::Protocol(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "too many headers",
+                )));
+            }
+        }
+    };
+    // RFC 9110 §6.3: no body for HEAD, 204, 304.
+    let no_body = req.method == "HEAD" || status == 204 || status == 304;
     let mut len: Option<usize> = None;
     let mut keep_alive = true;
     for _ in 0..MAX_HEADERS {
