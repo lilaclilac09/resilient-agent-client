@@ -281,7 +281,8 @@ impl Pool {
             let inner = &mut *g;
             let slot = inner.slots.entry(key.clone()).or_default();
 
-            if let Some(idle) = slot.idle.pop() {
+            let yield_idle = priority == Priority::Background && slot.waiting_interactive > 0;
+            if let Some(idle) = (!yield_idle).then(|| slot.idle.pop()).flatten() {
                 inner.stats.reused += 1;
                 inner.stats.idle_now -= 1;
                 drop(g);

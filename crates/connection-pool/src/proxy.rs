@@ -99,6 +99,15 @@ impl HttpConnectProxy {
         Self::from_lookup(|k| std::env::var(k).ok())
     }
 
+    /// True when any proxy variable is set, even one `from_lookup`
+    /// can't use (SOCKS, credentials): callers must then refuse to dial
+    /// directly instead of silently bypassing the proxy.
+    pub fn env_configured(get: impl Fn(&str) -> Option<String>) -> bool {
+        PROXY_VARS
+            .iter()
+            .any(|n| get(n).is_some_and(|v| !v.trim().is_empty()))
+    }
+
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Option<Self> {
         let pick = |names: &[&str]| {
             names
@@ -123,6 +132,15 @@ impl HttpConnectProxy {
 
 /// `http://host:port[/]` → `Origin`. Port defaults to 80. Credentials
 /// are not supported and make the URL rejected (never logged).
+const PROXY_VARS: [&str; 6] = [
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+];
+
 pub fn parse_http_proxy_url(url: &str) -> Option<Origin> {
     let url = url.trim();
     let rest = if let Some(r) = url.strip_prefix("http://") {
@@ -159,7 +177,7 @@ impl Connector for HttpConnectProxy {
         s.set_write_timeout(Some(left))?;
         let target = origin.to_string();
         s.write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())?;
-        let status = read_connect_reply(&mut s)?;
+        let status = read_connect_reply(&mut s, deadline)?;
         match status {
             200..=299 => Ok(s),
             502 | 503 => Err(io::Error::new(
@@ -181,7 +199,7 @@ impl Connector for HttpConnectProxy {
 
 /// Read the proxy's reply head byte by byte (so no tunnel bytes are
 /// consumed) and return its status code. Head capped at 8 KiB.
-fn read_connect_reply(s: &mut TcpStream) -> io::Result<u16> {
+fn read_connect_reply(s: &mut TcpStream, deadline: Instant) -> io::Result<u16> {
     let mut head = Vec::with_capacity(128);
     let mut b = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
@@ -191,6 +209,14 @@ fn read_connect_reply(s: &mut TcpStream) -> io::Result<u16> {
                 "proxy reply head too large",
             ));
         }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "proxy CONNECT timed out",
+            ));
+        }
+        s.set_read_timeout(Some(left))?;
         let n = s.read(&mut b)?;
         if n == 0 {
             return Err(io::Error::new(
@@ -316,5 +342,13 @@ mod tests {
             .connect(&Origin::new("x", 1), Duration::from_secs(1))
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused);
+    }
+
+    #[test]
+    fn unsupported_proxy_env_is_still_detected() {
+        let socks = |k: &str| (k == "ALL_PROXY").then(|| "socks5://127.0.0.1:7891".to_string());
+        assert!(HttpConnectProxy::from_lookup(socks).is_none());
+        assert!(HttpConnectProxy::env_configured(socks));
+        assert!(!HttpConnectProxy::env_configured(|_| None));
     }
 }

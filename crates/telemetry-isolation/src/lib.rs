@@ -446,7 +446,11 @@ fn background_loop(config: DispatcherConfig, gate: Gate, bg: Arc<BgShared>, sink
                 .0;
             continue;
         }
-        if let Some((_, job)) = st.queue.pop() {
+        if let Some((kind, job)) = st.queue.pop() {
+            if kind == BackgroundKind::Telemetry && !gate.controls.telemetry_enabled() {
+                bg.telemetry_dropped.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
             drop(st);
             job();
             bg.background_run.fetch_add(1, Ordering::Relaxed);

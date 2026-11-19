@@ -177,6 +177,9 @@ impl Client {
             ProxyMode::Direct => Arc::new(DirectConnector),
             ProxyMode::FromEnv => match HttpConnectProxy::from_env() {
                 Some(p) => Arc::new(p),
+                None if HttpConnectProxy::env_configured(|k| std::env::var(k).ok()) => {
+                    return Err("proxy variable set but unsupported (need http:// without credentials); refusing to bypass it".into());
+                }
                 None => Arc::new(DirectConnector),
             },
             ProxyMode::Http(p) => Arc::new(p.clone()),
@@ -222,13 +225,17 @@ impl Client {
         let key = origin.key();
         let idempotent = req.is_idempotent();
         let mut attempts = 0u32;
-        let mut stale_retry_used = false;
+        let mut stale_retries = 0usize;
         loop {
             if !self.breakers.allow_request(&key) {
                 return Err(ClientError::CircuitOpen { origin: key });
             }
             let mut conn = match self.pool.checkout(origin, req.priority) {
                 Ok(c) => c,
+                Err(PoolError::Connect(e)) if !is_network_error(&e) => {
+                    self.breakers.abandon(&key);
+                    return Err(ClientError::Pool(PoolError::Connect(e)));
+                }
                 Err(PoolError::Connect(e)) => {
                     attempts += 1;
                     match self.on_network_error(&key, e, idempotent, attempts) {
@@ -243,7 +250,13 @@ impl Client {
             };
             attempts += 1;
             let reused = conn.reused();
-            match exchange(&mut conn, origin, req, self.config.max_body) {
+            match exchange(
+                &mut conn,
+                origin,
+                req,
+                self.config.max_body,
+                self.config.pool.io_timeout,
+            ) {
                 Ok((resp, keep_alive)) => {
                     self.breakers.record(&key, Outcome::Success);
                     self.retries.on_success(&key);
@@ -254,11 +267,15 @@ impl Client {
                     }
                     return Ok(Response { attempts, ..resp });
                 }
-                Err(Fail::Stale(_)) if reused && !stale_retry_used => {
+                Err(Fail::Stale(_))
+                    if reused
+                        && idempotent
+                        && stale_retries < self.pool.config().max_per_origin =>
+                {
                     // A pooled keep-alive socket the peer already closed:
                     // retry once on a fresh socket without counting it.
                     conn.discard();
-                    stale_retry_used = true;
+                    stale_retries += 1;
                     attempts -= 1;
                     self.breakers.abandon(&key);
                     continue;
@@ -345,13 +362,52 @@ fn classify(e: io::Error, got_bytes: bool) -> Fail {
     }
 }
 
+/// Reads that never outlive the request's total deadline, even when
+/// bytes keep trickling in within each I/O timeout.
+struct Deadlined<'a> {
+    s: &'a mut std::net::TcpStream,
+    deadline: Instant,
+    io: Duration,
+}
+
+impl Read for Deadlined<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "total request timeout",
+            ));
+        }
+        self.s.set_read_timeout(Some(left.min(self.io)))?;
+        self.s.read(buf)
+    }
+}
+
+const MAX_HEAD_LINE: u64 = 8 * 1024;
+const MAX_HEADERS: usize = 100;
+
+/// `read_line` capped at [`MAX_HEAD_LINE`] bytes.
+fn read_head_line(r: &mut impl BufRead, line: &mut String) -> io::Result<usize> {
+    let n = r.by_ref().take(MAX_HEAD_LINE).read_line(line)?;
+    if n as u64 == MAX_HEAD_LINE && !line.ends_with('\n') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "response header line too long",
+        ));
+    }
+    Ok(n)
+}
+
 fn exchange(
     conn: &mut connection_pool::Conn,
     origin: &Origin,
     req: &Request,
     max_body: usize,
+    io_timeout: Duration,
 ) -> Result<(Response, bool), Fail> {
     conn.arm_deadline().map_err(|e| classify(e, true))?;
+    let deadline = Instant::now() + conn.remaining();
     let head = format!(
         "{} {} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
         req.method,
@@ -363,9 +419,13 @@ fn exchange(
     s.write_all(head.as_bytes())
         .and_then(|_| s.write_all(&req.body))
         .map_err(|e| classify(e, false))?;
-    let mut r = BufReader::new(&mut *s);
+    let mut r = BufReader::new(Deadlined {
+        s,
+        deadline,
+        io: io_timeout,
+    });
     let mut line = String::new();
-    match r.read_line(&mut line) {
+    match read_head_line(&mut r, &mut line) {
         Ok(0) => {
             return Err(Fail::Stale(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -385,17 +445,30 @@ fn exchange(
                 "bad status line",
             ))
         })?;
+    // RFC 9110 §6.3: no body for HEAD, 1xx, 204, 304.
+    let no_body =
+        req.method == "HEAD" || (100..200).contains(&status) || status == 204 || status == 304;
     let mut len: Option<usize> = None;
     let mut keep_alive = true;
-    for _ in 0..100 {
+    for _ in 0..MAX_HEADERS {
         let mut h = String::new();
-        if r.read_line(&mut h).map_err(|e| classify(e, true))? == 0 {
+        if read_head_line(&mut r, &mut h).map_err(|e| classify(e, true))? == 0 {
             return Err(Fail::Network(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "closed in headers",
             )));
         }
         if h == "\r\n" || h == "\n" {
+            if no_body {
+                return Ok((
+                    Response {
+                        status,
+                        body: Vec::new(),
+                        attempts: 0,
+                    },
+                    keep_alive,
+                ));
+            }
             let len = len.ok_or_else(|| {
                 Fail::Protocol(io::Error::new(
                     io::ErrorKind::InvalidData,
