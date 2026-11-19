@@ -453,19 +453,31 @@ impl Client {
                     }
                     return Ok(Response { attempts, ..resp });
                 }
-                Err(Fail::Stale(_))
-                    if reused
-                        && idempotent
-                        && stale_retries < self.pool.config().max_per_origin
-                        && self.retries.try_spend_immediate(&key, Instant::now()) =>
-                {
-                    // A pooled keep-alive socket the peer already closed:
-                    // replay at once on another socket. Spends a retry
-                    // token but does not count toward the breaker.
+                Err(Fail::Stale(error)) if reused => {
+                    // A pooled keep-alive socket the peer already closed
+                    // says nothing about the origin's health: never count
+                    // it toward the breaker. Replay at once on another
+                    // socket if idempotent and a retry token is left.
                     conn.discard();
+                    self.breakers.abandon(&key);
+                    if !idempotent {
+                        return Err(ClientError::Network {
+                            error,
+                            reason: "non-idempotent",
+                            attempts,
+                        });
+                    }
+                    if stale_retries >= self.pool.config().max_per_origin
+                        || !self.retries.try_spend_immediate(&key, Instant::now())
+                    {
+                        return Err(ClientError::Network {
+                            error,
+                            reason: "retry budget exhausted",
+                            attempts,
+                        });
+                    }
                     stale_retries += 1;
                     attempts -= 1;
-                    self.breakers.abandon(&key);
                     continue;
                 }
                 Err(Fail::Stale(e)) | Err(Fail::Network(e)) => {

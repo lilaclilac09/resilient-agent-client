@@ -104,3 +104,34 @@ fn crlf_in_url_or_method_is_rejected_before_any_socket() {
     ));
     assert_eq!(c.pool().stats().opened, 0);
 }
+
+#[test]
+fn stale_keep_alive_closes_never_open_the_breaker() {
+    // Each connection answers one request, then closes without
+    // `Connection: close`: every reuse finds a stale socket.
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            let mut w = s.try_clone().unwrap();
+            let mut r = BufReader::new(s);
+            loop {
+                let mut h = String::new();
+                if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                    break;
+                }
+            }
+            let _ = w.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    });
+    let mut cfg = test_config(ProxyMode::Direct);
+    cfg.retry.budget.max_retries = 2;
+    let c = Client::new(cfg).unwrap();
+    let o = Origin::new("127.0.0.1", port);
+    for _ in 0..30 {
+        let _ = c.send(&o, &Request::get("/"));
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    assert_eq!(c.breakers().state(&o.key()), State::Closed);
+}
