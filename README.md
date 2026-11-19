@@ -61,16 +61,29 @@ resilient-agent-client/
 
 ## Harness
 
-- `harness/proxy-flapper` — toxiproxy-based local network / proxy
-  flapping simulation (stub).
+- `harness/proxy-flapper` — timed kill of a loopback server manufactures
+  proxy flapping (ECONNREFUSED / TCP RST); a breaker-gated client loop
+  asserts the breaker trips, rejects with zero socket cost while Open,
+  and closes again after recovery. Run it with
+  `bash harness/run-trip-test.sh`.
+- `harness/fault-server` — minimal loopback TCP server the flapper kills
+  and restarts; holds accepted sockets without reading so a kill sends
+  RSTs.
 - `harness/fd-monitor` — `lsof` / `/proc` FD and TCP-state monitoring
-  script; emits CSV rows for charting (see its README).
+  script; emits CSV rows for charting (see its README). It samples the
+  flapper's FD count out of process and opens no sockets itself, so the
+  measurement cannot leak FDs into the runner.
 
 ## Status
 
-Scaffold. The four crates and the harness are stubs (doc comments and
-TODO markers only) awaiting implementation. No network behavior is
-implemented yet.
+Implemented and verified: the circuit breaker (`crates/circuit-breaker`,
+8 unit tests) and the trip harness (`harness/proxy-flapper`,
+`harness/fault-server`, `harness/run-trip-test.sh` + `fd-monitor.sh`).
+Measured 2026-11-19 (60 s run, flap every 5 s, 1 s outage): 11 trips,
+312 requests rejected while Open, 154/210 attempts succeeded, FD count
+(external `lsof` sampling of the flapper PID) 11 baseline → 12 max →
+11 final. Still stubs: connection-pool, retry-budget,
+telemetry-isolation.
 
 ## Future research directions
 

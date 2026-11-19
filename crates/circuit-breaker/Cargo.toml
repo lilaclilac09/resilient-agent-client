@@ -2,6 +2,6 @@
 name = "circuit-breaker"
 version = "0.1.0"
 edition = "2021"
-description = "Per-origin circuit breaker (Closed / Open / Half-Open) for resilient-agent-client (stub)"
+description = "Per-origin circuit breaker (Closed / Open / Half-Open) for resilient-agent-client"
 
 [dependencies]

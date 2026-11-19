@@ -1,0 +1,7 @@
+[package]
+name = "fault-server"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal loopback TCP server for fault-injection tests (killed and restarted by proxy-flapper)"
+
+[dependencies]

@@ -6,4 +6,5 @@ members = [
     "crates/retry-budget",
     "crates/telemetry-isolation",
     "harness/proxy-flapper",
+    "harness/fault-server",
 ]

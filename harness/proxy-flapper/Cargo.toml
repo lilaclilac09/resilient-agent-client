@@ -2,6 +2,7 @@
 name = "proxy-flapper"
 version = "0.1.0"
 edition = "2021"
-description = "Toxiproxy-based local network/proxy flapping simulation harness (stub)"
+description = "Proxy flapping + circuit-breaker trip test harness (timed kill of a loopback server)"
 
 [dependencies]
+circuit-breaker = { path = "../../crates/circuit-breaker" }
