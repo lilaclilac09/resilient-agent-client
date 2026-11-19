@@ -1,0 +1,7 @@
+[package]
+name = "loopback-fixtures"
+version = "0.1.0"
+edition = "2021"
+description = "Loopback-only HTTP upstreams and a flappable HTTP CONNECT proxy for local resilience tests"
+
+[dependencies]

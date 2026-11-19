@@ -147,17 +147,47 @@ no circuit breaker shedding load while the fault is active.
 ```
 resilient-agent-client/
 ├── crates/
-│   ├── connection-pool/      # per-origin socket limits, strict timeouts, FD reclamation
-│   ├── circuit-breaker/      # Closed / Open / Half-Open state machine
-│   ├── retry-budget/         # jittered backoff + sliding-window retry budget
-│   └── telemetry-isolation/  # priority queue isolating core interaction from telemetry
+│   ├── connection-pool/      # per-origin/global socket caps, strict timeouts, FD reclamation, HTTP CONNECT proxy
+│   ├── circuit-breaker/      # Closed / Open / Half-Open state machine + per-origin Registry, probe timeout
+│   ├── retry-budget/         # decorrelated jitter + rolling per-origin retry budget, coalesced
+│   ├── telemetry-isolation/  # interactive vs background workers, gated queue, batched telemetry
+│   └── agent-client/         # facade composing the four; one Client shared by all agents
 ├── harness/
-│   ├── proxy-flapper/        # toxiproxy-based local network/proxy flapping simulation
-│   └── fd-monitor/           # lsof / proc monitoring script with charts
+│   ├── proxy-flapper/        # loopback flapping simulation (trip harness)
+│   ├── fault-server/         # loopback server killed/restarted on a timer
+│   ├── fd-monitor/           # external /proc + lsof FD sampling
+│   ├── loopback-fixtures/    # keep-alive upstreams + flappable loopback CONNECT proxy
+│   ├── multi-agent-proxy/    # N agents through one flapping proxy, checks §5 bounds
+│   ├── mihomo-e2e/           # validated HTTPS through a real mihomo process on loopback
+│   └── mihomo/               # run-mihomo-e2e.sh
 ├── docs/
-│   └── SPEC.md
+│   ├── SPEC.md
+│   ├── PROVENANCE.md         # rule → source → code → test, reference ratings
+│   ├── MIHOMO.md             # multi-agent use behind mihomo / clash
+│   └── RSI-REINFORCEMENT.md  # bounded measure → change → re-measure loop
 └── README.md
 ```
+
+### 6.1 Additions beyond §4
+
+- **Probe timeout** (§4.3): a Half-Open probe that never reports back
+  returns the breaker to Open after `probe_timeout` (default 30 s) with a
+  doubled hold, instead of blocking the origin forever.
+- **Proxy transport**: connections go through `HTTPS_PROXY` /
+  `HTTP_PROXY` / `ALL_PROXY` via HTTP `CONNECT`, honouring `NO_PROXY` and
+  loopback. Proxy 502/503 count as connection refused and 504 as timeout,
+  so a dead upstream behind a live proxy still trips the breaker. Proxy
+  credentials in the URL are rejected.
+- **Stale keep-alive retry**: a pooled socket that fails before any
+  response byte is retried once on a fresh socket without spending retry
+  budget or counting toward the breaker.
+- **Hardening from review**: proxy variables that are set but unsupported make `Client::new` fail instead of dialling direct; response head lines are capped at 8 KiB and 100 headers; every read is bounded by the total deadline; HEAD/1xx/204/304 have no body; stale-socket replays only for idempotent requests; proxy 407 is not a network failure; queued telemetry is dropped on opt-out; background never takes an idle socket ahead of a waiting interactive request.
+- **Retry budget counts attempts** (§4.2): every outbound retry spends a token — scheduled, coalesced onto another request's schedule, or an immediate stale-socket replay — so at most 10 retries leave the client per origin per 60 s however many callers fail at once. Coalescing shares the wait and the backoff step, not the budget.
+- **Background cooldown probe** (§4.4): background work stays paused while any breaker is not Closed, but a job submitted with `Dispatcher::submit_background_for(kind, origin, job)` may run as that origin's single Half-Open probe, at most once per cooldown (breaker `cooldown_epoch`). Never while offline, with background disabled, or for opted-out telemetry. Untagged jobs never probe. This lets an origin that only background traffic uses recover without interactive traffic.
+- **HTTPS** (public API): `Client::send_https` / `Client::get("https://…")` verify the chain and name with rustls against `ClientConfig::tls` (Mozilla roots by default, private CAs via `Tls::with_extra_ca_pem`); verification cannot be turned off. The TLS session is stored with the pooled socket, so keep-alive reuse skips the handshake. TLS failures are `ClientError::Tls`: not retried, not counted toward the breaker.
+- **Interim responses**: 1xx (except 101) are skipped before the final response, keeping keep-alive framing in sync.
+- **Shared client**: one `agent_client::Client` per process, so the caps
+  in §4.1 bound all agents together.
 
 ## 7. Closing note
 

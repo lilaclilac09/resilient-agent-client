@@ -1,0 +1,11 @@
+[package]
+name = "mihomo-e2e"
+version = "0.1.0"
+edition = "2021"
+description = "Bounded loopback test: agents make certificate-validated HTTPS requests through a real mihomo process"
+
+[dependencies]
+agent-client = { path = "../../crates/agent-client" }
+connection-pool = { path = "../../crates/connection-pool" }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

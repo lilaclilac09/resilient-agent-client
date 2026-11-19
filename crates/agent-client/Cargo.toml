@@ -1,0 +1,16 @@
+[package]
+name = "agent-client"
+version = "0.1.0"
+edition = "2021"
+description = "Resilient HTTP/1.1 client for coding agents: bounded pool + retry budget + per-origin breaker + traffic isolation"
+
+[dependencies]
+circuit-breaker = { path = "../circuit-breaker" }
+connection-pool = { path = "../connection-pool" }
+retry-budget = { path = "../retry-budget" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+telemetry-isolation = { path = "../telemetry-isolation" }
+webpki-roots = "1"
+
+[dev-dependencies]
+loopback-fixtures = { path = "../../harness/loopback-fixtures" }
