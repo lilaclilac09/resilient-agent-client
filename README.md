@@ -88,8 +88,8 @@ Measured 2026-11-19:
   10 → 11 max → 11 final, final state Closed.
 - `cargo run --release -p multi-agent-proxy -- 24 20 2000` (24 agents,
   one shared client, loopback CONNECT proxy killed 6 times): peak 8
-  sockets per origin (cap 8), 31 retries (ceiling 150), 7,123 local
-  rejections while Open, recovery 509 ms after the proxy returned,
+  sockets per origin (cap 8), 41 retry attempts (ceiling 150), 6,022 local
+  rejections while Open, recovery 452 ms after the proxy returned,
   process FDs 8 → 8.
 
 - `harness/mihomo/run-mihomo-e2e.sh` (real mihomo v1.19.34, loopback):

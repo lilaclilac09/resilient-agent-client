@@ -35,10 +35,11 @@ prints a JSON summary; it exits non-zero if a bound is broken. The fixture
 proxy only tunnels to loopback targets.
 
 Measured on 2026-11-19 (24 agents, 20 s, 6 proxy kills): 2,940 requests
-OK, 7,123 rejected locally while Open, 0 unexplained errors, 41 retries
-(ceiling 150), peak 8 sockets per origin (cap 8), 59 sockets opened in
-total, recovery 509 ms after the proxy returned, process FDs 8 → 8. The
-FD peak (296) includes the in-process fixture proxy's own tunnel sockets.
+OK, 6,022 rejected locally while Open, 0 unexplained errors, 41 retry
+attempts (ceiling 150, every coalesced and immediate retry counted), peak
+8 sockets per origin (cap 8), 99 sockets opened in total, recovery 452 ms
+after the proxy returned, process FDs 8 → 8. The FD peak (296) includes
+the in-process fixture proxy's own tunnel sockets.
 
 ## Real mihomo test (`harness/mihomo-e2e`)
 
