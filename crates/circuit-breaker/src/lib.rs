@@ -9,6 +9,8 @@
 //! No external dependencies: jitter uses a small xorshift PRNG seeded
 //! from the system clock, so the crate builds offline.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Configuration for [`CircuitBreaker`]. Defaults follow SPEC §4.3.
@@ -22,6 +24,9 @@ pub struct Config {
     pub open_hold_max: Duration,
     /// Absolute cap on the Open hold after repeated failed probes.
     pub max_hold: Duration,
+    /// A Half-Open probe that has not reported within this time counts
+    /// as a failed probe, so a lost probe cannot wedge the breaker.
+    pub probe_timeout: Duration,
 }
 
 impl Default for Config {
@@ -31,6 +36,7 @@ impl Default for Config {
             open_hold_min: Duration::from_secs(30),
             open_hold_max: Duration::from_secs(60),
             max_hold: Duration::from_secs(300),
+            probe_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -44,6 +50,7 @@ impl Config {
             open_hold_min: Duration::from_millis(2000),
             open_hold_max: Duration::from_millis(4000),
             max_hold: Duration::from_secs(30),
+            probe_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -94,6 +101,7 @@ pub struct CircuitBreaker {
     opened_at: Option<Instant>,
     hold: Duration,
     probe_in_flight: bool,
+    probe_started: Option<Instant>,
     trips: u64,
     rejected: u64,
     events: Vec<Transition>,
@@ -114,6 +122,7 @@ impl CircuitBreaker {
             opened_at: None,
             hold: Duration::from_secs(0),
             probe_in_flight: false,
+            probe_started: None,
             trips: 0,
             rejected: 0,
             events: Vec::new(),
@@ -148,6 +157,7 @@ impl CircuitBreaker {
                     false
                 } else {
                     self.probe_in_flight = true;
+                    self.probe_started = Some(Instant::now());
                     true
                 }
             }
@@ -193,6 +203,16 @@ impl CircuitBreaker {
         }
     }
 
+    /// Give back an allowed request that never reached the network (for
+    /// example the connection pool refused it). In Half-Open this frees
+    /// the probe slot without a verdict; otherwise it is a no-op.
+    pub fn abandon(&mut self) {
+        if self.state == State::HalfOpen {
+            self.probe_in_flight = false;
+            self.probe_started = None;
+        }
+    }
+
     /// Consecutive counted failures since the last success (Closed only).
     pub fn consecutive_failures(&self) -> u32 {
         self.consecutive_failures
@@ -220,6 +240,17 @@ impl CircuitBreaker {
     }
 
     fn refresh(&mut self) {
+        if self.state == State::HalfOpen && self.probe_in_flight {
+            if let Some(started) = self.probe_started {
+                if started.elapsed() >= self.config.probe_timeout {
+                    self.probe_in_flight = false;
+                    self.probe_started = None;
+                    self.hold = std::cmp::min(self.hold * 2, self.config.max_hold);
+                    self.transition(State::Open, "half-open probe timed out; hold doubled");
+                    self.trips += 1;
+                }
+            }
+        }
         if self.state == State::Open {
             if let Some(opened) = self.opened_at {
                 if opened.elapsed() >= self.hold {
@@ -263,6 +294,106 @@ impl CircuitBreaker {
     }
 }
 
+impl State {
+    /// Numeric gauge value for metrics: Closed 0, Half-Open 1, Open 2.
+    pub fn as_metric(self) -> u8 {
+        match self {
+            State::Closed => 0,
+            State::HalfOpen => 1,
+            State::Open => 2,
+        }
+    }
+}
+
+/// Called on every breaker transition with the origin it belongs to.
+pub type TransitionObserver = Arc<dyn Fn(&str, &Transition) + Send + Sync>;
+
+/// Thread-safe set of per-origin breakers shared by a client, its
+/// connection pool callers and the background queue (SPEC §4.3, §4.4).
+pub struct Registry {
+    config: Config,
+    breakers: Mutex<HashMap<String, CircuitBreaker>>,
+    observer: Option<TransitionObserver>,
+}
+
+impl Registry {
+    pub fn new(config: Config) -> Self {
+        Self {
+            config,
+            breakers: Mutex::new(HashMap::new()),
+            observer: None,
+        }
+    }
+
+    /// Log / metric hook fired on every transition (SPEC §4.3, §5).
+    pub fn with_observer(mut self, observer: TransitionObserver) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    fn with<T>(&self, origin: &str, f: impl FnOnce(&mut CircuitBreaker) -> T) -> T {
+        let mut map = self.breakers.lock().unwrap_or_else(|e| e.into_inner());
+        let b = map
+            .entry(origin.to_string())
+            .or_insert_with(|| CircuitBreaker::new(self.config));
+        let before = b.events.len();
+        let out = f(b);
+        if let Some(obs) = &self.observer {
+            for t in &b.events[before..] {
+                obs(origin, t);
+            }
+        }
+        out
+    }
+
+    pub fn allow_request(&self, origin: &str) -> bool {
+        self.with(origin, |b| b.allow_request())
+    }
+
+    pub fn record(&self, origin: &str, outcome: Outcome) {
+        self.with(origin, |b| b.record(outcome))
+    }
+
+    pub fn abandon(&self, origin: &str) {
+        self.with(origin, |b| b.abandon())
+    }
+
+    pub fn state(&self, origin: &str) -> State {
+        self.with(origin, |b| b.state())
+    }
+
+    /// True when every known breaker is Closed. Background work stays
+    /// paused while any breaker is Open or Half-Open: it resumes only
+    /// after a Half-Open probe succeeds.
+    pub fn all_closed(&self) -> bool {
+        let mut map = self.breakers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = true;
+        for (origin, b) in map.iter_mut() {
+            let before = b.events.len();
+            if b.state() != State::Closed {
+                all = false;
+            }
+            if let Some(obs) = &self.observer {
+                for t in &b.events[before..] {
+                    obs(origin, t);
+                }
+            }
+        }
+        all
+    }
+
+    /// `(origin, state, trips, rejected)` for every known origin.
+    pub fn snapshot(&self) -> Vec<(String, State, u64, u64)> {
+        let mut map = self.breakers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut v: Vec<_> = map
+            .iter_mut()
+            .map(|(o, b)| (o.clone(), b.state(), b.trips(), b.rejected()))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +405,7 @@ mod tests {
             open_hold_min: Duration::from_millis(50),
             open_hold_max: Duration::from_millis(100),
             max_hold: Duration::from_secs(5),
+            probe_timeout: Duration::from_millis(200),
         })
     }
 
@@ -369,7 +501,10 @@ mod tests {
             trip(&mut b);
             let hold = b.current_hold();
             assert!(hold >= Duration::from_millis(50), "hold {hold:?} below min");
-            assert!(hold <= Duration::from_millis(100), "hold {hold:?} above max");
+            assert!(
+                hold <= Duration::from_millis(100),
+                "hold {hold:?} above max"
+            );
         }
     }
 
@@ -380,5 +515,72 @@ mod tests {
         assert_eq!(b.events().len(), 1);
         assert_eq!(b.events()[0].from, State::Closed);
         assert_eq!(b.events()[0].to, State::Open);
+    }
+
+    #[test]
+    fn lost_probe_times_out_and_reopens() {
+        let mut b = test_breaker();
+        trip(&mut b);
+        let first_hold = b.current_hold();
+        sleep(first_hold + Duration::from_millis(20));
+        assert!(b.allow_request(), "probe should be allowed after hold");
+        // The probe never reports; after probe_timeout it counts as failed.
+        sleep(Duration::from_millis(250));
+        assert_eq!(b.state(), State::Open);
+        assert_eq!(b.trips(), 2);
+        assert_eq!(
+            b.current_hold(),
+            std::cmp::min(first_hold * 2, Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn abandoned_probe_frees_the_slot() {
+        let mut b = test_breaker();
+        trip(&mut b);
+        sleep(Duration::from_millis(150));
+        assert!(b.allow_request());
+        b.abandon();
+        assert_eq!(b.state(), State::HalfOpen);
+        assert!(b.allow_request(), "slot should be free after abandon");
+    }
+
+    #[test]
+    fn registry_tracks_origins_independently_and_reports_transitions() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        let reg = Registry::new(Config {
+            failure_threshold: 5,
+            open_hold_min: Duration::from_millis(50),
+            open_hold_max: Duration::from_millis(100),
+            max_hold: Duration::from_secs(5),
+            probe_timeout: Duration::from_millis(200),
+        })
+        .with_observer(Arc::new(move |o, t| {
+            s2.lock().unwrap().push((o.to_string(), t.from, t.to))
+        }));
+        for _ in 0..5 {
+            reg.record("a", Outcome::NetworkError);
+        }
+        reg.record("b", Outcome::Success);
+        assert_eq!(reg.state("a"), State::Open);
+        assert_eq!(reg.state("b"), State::Closed);
+        assert!(!reg.all_closed());
+        assert!(!reg.allow_request("a"));
+        assert!(reg.allow_request("b"));
+        sleep(Duration::from_millis(150));
+        assert!(!reg.all_closed(), "Half-Open still pauses background work");
+        assert!(reg.allow_request("a"));
+        reg.record("a", Outcome::Success);
+        assert!(reg.all_closed());
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            *seen,
+            vec![
+                ("a".to_string(), State::Closed, State::Open),
+                ("a".to_string(), State::Open, State::HalfOpen),
+                ("a".to_string(), State::HalfOpen, State::Closed),
+            ]
+        );
     }
 }

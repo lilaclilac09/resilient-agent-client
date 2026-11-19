@@ -2,6 +2,6 @@
 name = "connection-pool"
 version = "0.1.0"
 edition = "2021"
-description = "Bounded per-origin connection pool for resilient-agent-client (stub)"
+description = "Bounded per-origin connection pool for resilient-agent-client"
 
 [dependencies]

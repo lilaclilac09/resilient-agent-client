@@ -1,0 +1,9 @@
+[package]
+name = "multi-agent-proxy"
+version = "0.1.0"
+edition = "2021"
+description = "Bounded local run: N agents share one client through a flapping loopback CONNECT proxy"
+
+[dependencies]
+agent-client = { path = "../../crates/agent-client" }
+loopback-fixtures = { path = "../loopback-fixtures" }

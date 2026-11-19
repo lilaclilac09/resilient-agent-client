@@ -147,17 +147,40 @@ no circuit breaker shedding load while the fault is active.
 ```
 resilient-agent-client/
 ├── crates/
-│   ├── connection-pool/      # per-origin socket limits, strict timeouts, FD reclamation
-│   ├── circuit-breaker/      # Closed / Open / Half-Open state machine
-│   ├── retry-budget/         # jittered backoff + sliding-window retry budget
-│   └── telemetry-isolation/  # priority queue isolating core interaction from telemetry
+│   ├── connection-pool/      # per-origin/global socket caps, strict timeouts, FD reclamation, HTTP CONNECT proxy
+│   ├── circuit-breaker/      # Closed / Open / Half-Open state machine + per-origin Registry, probe timeout
+│   ├── retry-budget/         # decorrelated jitter + rolling per-origin retry budget, coalesced
+│   ├── telemetry-isolation/  # interactive vs background workers, gated queue, batched telemetry
+│   └── agent-client/         # facade composing the four; one Client shared by all agents
 ├── harness/
-│   ├── proxy-flapper/        # toxiproxy-based local network/proxy flapping simulation
-│   └── fd-monitor/           # lsof / proc monitoring script with charts
+│   ├── proxy-flapper/        # loopback flapping simulation (trip harness)
+│   ├── fault-server/         # loopback server killed/restarted on a timer
+│   ├── fd-monitor/           # external /proc + lsof FD sampling
+│   ├── loopback-fixtures/    # keep-alive upstreams + flappable loopback CONNECT proxy
+│   └── multi-agent-proxy/    # N agents through one flapping proxy, checks §5 bounds
 ├── docs/
-│   └── SPEC.md
+│   ├── SPEC.md
+│   ├── PROVENANCE.md         # rule → source → code → test, reference ratings
+│   ├── MIHOMO.md             # multi-agent use behind mihomo / clash
+│   └── RSI-REINFORCEMENT.md  # bounded measure → change → re-measure loop
 └── README.md
 ```
+
+### 6.1 Additions beyond §4
+
+- **Probe timeout** (§4.3): a Half-Open probe that never reports back
+  returns the breaker to Open after `probe_timeout` (default 30 s) with a
+  doubled hold, instead of blocking the origin forever.
+- **Proxy transport**: connections go through `HTTPS_PROXY` /
+  `HTTP_PROXY` / `ALL_PROXY` via HTTP `CONNECT`, honouring `NO_PROXY` and
+  loopback. Proxy 502/503 count as connection refused and 504 as timeout,
+  so a dead upstream behind a live proxy still trips the breaker. Proxy
+  credentials in the URL are rejected.
+- **Stale keep-alive retry**: a pooled socket that fails before any
+  response byte is retried once on a fresh socket without spending retry
+  budget or counting toward the breaker.
+- **Shared client**: one `agent_client::Client` per process, so the caps
+  in §4.1 bound all agents together.
 
 ## 7. Closing note
 

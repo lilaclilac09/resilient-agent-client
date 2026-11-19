@@ -76,14 +76,25 @@ resilient-agent-client/
 
 ## Status
 
-Implemented and verified: the circuit breaker (`crates/circuit-breaker`,
-8 unit tests) and the trip harness (`harness/proxy-flapper`,
-`harness/fault-server`, `harness/run-trip-test.sh` + `fd-monitor.sh`).
-Measured 2026-11-19 (60 s run, flap every 5 s, 1 s outage): 11 trips,
-312 requests rejected while Open, 154/210 attempts succeeded, FD count
-(external `lsof` sampling of the flapper PID) 11 baseline → 12 max →
-11 final. Still stubs: connection-pool, retry-budget,
-telemetry-isolation.
+All four modules are implemented and composed in `crates/agent-client`
+(one `Client` shared by every agent in a process, optionally through a
+local HTTP proxy such as mihomo via `HTTPS_PROXY`). `cargo test
+--workspace`: 47 tests, loopback fixtures only.
+
+Measured 2026-11-19:
+
+- `bash harness/run-trip-test.sh 30` (proxy flap every 5 s): 5 trips,
+  130 requests rejected while Open, 96/122 attempts succeeded, FD
+  10 → 11 max → 11 final, final state Closed.
+- `cargo run --release -p multi-agent-proxy -- 24 20 2000` (24 agents,
+  one shared client, loopback CONNECT proxy killed 6 times): peak 8
+  sockets per origin (cap 8), 31 retries (ceiling 150), 7,123 local
+  rejections while Open, recovery 509 ms after the proxy returned,
+  process FDs 8 → 8.
+
+Docs: [SPEC](docs/SPEC.md) · [provenance and references](docs/PROVENANCE.md)
+· [multi-agent behind mihomo](docs/MIHOMO.md)
+· [RSI / reinforcement](docs/RSI-REINFORCEMENT.md)
 
 ## Future research directions
 

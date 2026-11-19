@@ -2,6 +2,6 @@
 name = "retry-budget"
 version = "0.1.0"
 edition = "2021"
-description = "Decorrelated-jitter backoff and sliding-window retry budget for resilient-agent-client (stub)"
+description = "Decorrelated-jitter backoff and sliding-window retry budget for resilient-agent-client"
 
 [dependencies]
