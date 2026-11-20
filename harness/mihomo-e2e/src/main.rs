@@ -252,6 +252,10 @@ fn run_mcp_phase(
     let mut child = Command::new(bin)
         .env("AGENT_FETCH_PROXY", format!("http://127.0.0.1:{mixed}"))
         .env("AGENT_FETCH_CA_FILE", ca_file)
+        .env(
+            "AGENT_FETCH_ALLOW",
+            format!("https://localhost:{up},https://127.0.0.1:{up}"),
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

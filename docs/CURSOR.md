@@ -23,6 +23,29 @@ intercept, forward, or patch, and those are out of scope on purpose.
 | **Cursor Settings → Network → Run Diagnostics** ([troubleshooting][ts]) | Tests Cursor's connection to its backend. | Diagnosis only. | Nothing. It changes no behaviour. |
 | **The `curl` streaming checks in [Cursor's network docs][net]** | Shows whether a proxy buffers SSE or HTTP/2 bidi streams. | Diagnosis only. | Nothing. Run them only on your own network if you choose to. |
 
+## Permission boundary of `resilient_fetch`
+
+The tool is an agent-facing network permission, so it stays narrow:
+
+- **Default deny.** It reaches only the exact origins the operator lists
+  in `AGENT_FETCH_ALLOW` (`https://host[:port]`, comma-separated, port
+  defaults to 443). Unset or empty means every call is refused. The
+  server refuses to start on wildcard (`*`), `http://`, credential, path
+  or port-0 entries.
+- **HTTPS only, GET/HEAD only.** The certificate chain and host name are
+  always verified. URLs with embedded credentials are rejected.
+- **No redirects followed.** A 3xx comes back as the result; the agent
+  has to make a new call, which the allowlist checks again.
+- **Tool input can't widen it.** Proxy (`HTTPS_PROXY`,
+  `AGENT_FETCH_PROXY`), trust (`AGENT_FETCH_CA_FILE`) and the allowlist
+  come only from the server's environment as set by the operator in
+  `mcp.json`. Any argument besides `url`, `method` and `max_chars` is
+  refused.
+- **Host restrictions stay in force.** It's an ordinary process: it goes
+  through the configured proxy or the host's normal routing, and
+  firewall or mihomo rules still apply. It never bypasses or changes
+  them.
+
 ## Setup: `agent-fetch-mcp` in Cursor
 
 1. Build it with `cargo build --release -p agent-fetch-mcp`.
@@ -35,6 +58,7 @@ intercept, forward, or patch, and those are out of scope on purpose.
          "type": "stdio",
          "command": "/absolute/path/to/target/release/agent-fetch-mcp",
          "env": {
+           "AGENT_FETCH_ALLOW": "https://api.example.com,https://docs.example.com",
            "HTTPS_PROXY": "http://127.0.0.1:<mihomo mixed-port>",
            "NO_PROXY": "localhost,127.0.0.1,::1"
          }
@@ -58,13 +82,16 @@ failing fast`). They don't hang, and they don't open new sockets.
 - `cargo test -p agent-fetch-mcp` drives the real binary over stdio:
   - The initialize/tools list/tools call lifecycle works.
   - 120 concurrent calls through a loopback CONNECT proxy all succeeded on ≤ 8 tunnels. The server runs at most 40 at once (pool sockets plus queue) and holds the rest for up to 30 s instead of failing them.
-  - POST and unknown tools are refused.
+  - Default deny works.
+  - http://, other ports, credentials, extra `proxy`/`ca_file` arguments and POST are all refused without a connection.
+  - Invalid allowlist entries stop the server.
+  - Malformed JSON-RPC gets `-32600`.
   - With the proxy killed, calls fail fast with `circuit open`.
 - `harness/mihomo/run-mihomo-e2e.sh` starts the server with `AGENT_FETCH_PROXY` pointing at a real mihomo mixed-port and `AGENT_FETCH_CA_FILE` set to the sandbox CA:
   - 80 concurrent verified HTTPS tool calls through real mihomo v1.19.34: 80/80 OK.
   - A wrong host name is refused with a TLS error.
 
-Not verified: that a specific Cursor build loads it. That needs Cursor on
+Nothing has been installed on the owner's machine. Not verified: that a specific Cursor build loads it. That needs Cursor on
 the owner's machine. The config above follows Cursor's documented
 `mcp.json` stdio format.
 

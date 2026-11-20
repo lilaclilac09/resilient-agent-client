@@ -10,3 +10,5 @@ serde_json = "1"
 
 [dev-dependencies]
 loopback-fixtures = { path = "../../harness/loopback-fixtures" }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

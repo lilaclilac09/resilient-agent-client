@@ -79,7 +79,7 @@ resilient-agent-client/
 All four modules are implemented and composed in `crates/agent-client`
 (one `Client` shared by every agent in a process, optionally through a
 local HTTP proxy such as mihomo via `HTTPS_PROXY`). `cargo test
---workspace`: 63 tests, loopback fixtures only.
+--workspace`: 66 tests, loopback fixtures only.
 
 Measured 2026-11-19:
 

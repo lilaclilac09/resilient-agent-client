@@ -21,6 +21,8 @@ version = "0.1.0"
 dependencies = [
  "agent-client",
  "loopback-fixtures",
+ "rcgen",
+ "rustls",
  "serde_json",
 ]
 
