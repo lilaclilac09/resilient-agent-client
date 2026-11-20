@@ -106,6 +106,39 @@ fn malformed_or_truncated_bodies_fail() {
 }
 
 #[test]
+fn truncated_chunk_metadata_is_a_network_failure() {
+    for reply in [
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-Trailer: partial\r",
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nx",
+    ] {
+        let server = origin(vec![reply]);
+        let mut config = test_config(ProxyMode::Direct);
+        config.max_attempts = 1;
+        config.breaker.failure_threshold = 1;
+        let client = Client::new(config).unwrap();
+        let error = client.send(&server, &Request::get("/")).unwrap_err();
+        assert!(
+            matches!(&error, ClientError::Network { error, attempts: 1, .. }
+                if error.kind() == std::io::ErrorKind::UnexpectedEof),
+            "{reply:?}: {error:?}"
+        );
+        assert_eq!(client.breakers().state(&server.key()), State::Open);
+    }
+    for reply in [
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nInvalid\r\n",
+    ] {
+        assert!(matches!(
+            check(reply, ProxyMode::Direct, 5),
+            Err(ClientError::Protocol(_))
+        ));
+    }
+}
+
+#[test]
 fn no_body_responses_leave_connection_in_sync() {
     let server = origin(vec![
         "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",

@@ -656,11 +656,22 @@ fn invalid_body(message: &'static str) -> Fail {
     Fail::Protocol(io::Error::new(io::ErrorKind::InvalidData, message))
 }
 
+fn read_chunk_line(r: &mut impl BufRead) -> Result<String, Fail> {
+    let mut line = String::new();
+    read_head_line(r, &mut line).map_err(|e| classify(e, true))?;
+    if !line.ends_with('\n') {
+        return Err(classify(
+            io::Error::new(io::ErrorKind::UnexpectedEof, "closed in chunk metadata"),
+            true,
+        ));
+    }
+    Ok(line)
+}
+
 fn read_chunked(r: &mut impl BufRead, max_body: usize) -> Result<Vec<u8>, Fail> {
     let mut body = Vec::new();
     loop {
-        let mut line = String::new();
-        read_head_line(r, &mut line).map_err(|e| classify(e, true))?;
+        let line = read_chunk_line(r)?;
         let line = line
             .strip_suffix("\r\n")
             .ok_or_else(|| invalid_body("invalid chunk size line"))?;
@@ -672,8 +683,7 @@ fn read_chunked(r: &mut impl BufRead, max_body: usize) -> Result<Vec<u8>, Fail> 
             usize::from_str_radix(size, 16).map_err(|_| invalid_body("invalid chunk size"))?;
         if size == 0 {
             for _ in 0..=MAX_HEADERS {
-                let mut trailer = String::new();
-                read_head_line(r, &mut trailer).map_err(|e| classify(e, true))?;
+                let trailer = read_chunk_line(r)?;
                 if trailer == "\r\n" {
                     return Ok(body);
                 }
