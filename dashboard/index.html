@@ -23,14 +23,15 @@
     .eyebrow { color: #b9d2ec; font-size: .75rem; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
     h1 { margin: .25rem 0 .4rem; font-size: clamp(2rem, 6vw, 3rem); line-height: 1.15; }
     header p { margin: 0; color: #dde9f7; }
-    .panel, .source {
+    .panel {
       margin-top: 1.25rem;
       padding: 1.5rem;
       border: 1px solid #dce3ec;
       border-radius: 1rem;
       background: white;
     }
-    .status { display: flex; justify-content: space-between; gap: .5rem 1rem; flex-wrap: wrap; align-items: baseline; }
+    .toolbar { margin-top: 1.25rem; }
+    .source { margin-top: 1.5rem; }
     h2 { margin: 0; font-size: 1.125rem; }
     a { color: #235486; text-underline-offset: .15em; }
     :focus-visible { outline: 3px solid #235486; outline-offset: 3px; }
@@ -49,7 +50,7 @@
     dd:last-child { margin-bottom: 0; }
     @media (max-width: 38rem) {
       main { padding: 1rem .75rem; }
-      header, .panel, .source { padding: 1rem; }
+      header, .panel { padding: 1rem; }
       .series-key { display: grid; gap: .25rem; margin: 1rem 0; overflow-wrap: anywhere; }
       .comparison { scroll-margin-block-start: .5rem; }
       table, tbody { display: block; }
@@ -87,44 +88,23 @@
       <h1>Proxy latency</h1>
       <p>Compare request latency for the baseline and candidate proxy configurations.</p>
     </header>
-    <section class="panel" aria-labelledby="comparison-title">
-      <div class="status">
-        <h2 id="comparison-title">$state</h2>
-        <a href="" id="refresh-results">Refresh results</a>
-      </div>
+    <div class="toolbar">
+      $refresh
       <p class="note" id="refresh-status" role="status" hidden></p>
-      <p>$message</p>
-      <p class="note">Expected input: <code>$input_label</code>. $help</p>
-      <p class="series-key" aria-hidden="true">
-        <span><strong>Before:</strong> $before_label</span>
-        <span><strong>After:</strong> $after_label</span>
-      </p>
-      <div class="comparison" tabindex="0" role="region" aria-label="Before and after latency">
-        <table role="table" aria-label="Proxy request latency comparison">
-          <thead role="rowgroup">
-            <tr role="row">
-              <th scope="col" role="columnheader">Metric</th>
-              <th scope="col" role="columnheader">Before <small>$before_label</small></th>
-              <th scope="col" role="columnheader">After <small>$after_label</small></th>
-              <th scope="col" role="columnheader">Change</th>
-            </tr>
-          </thead>
-          <tbody role="rowgroup">$rows</tbody>
-        </table>
-      </div>
-      <p class="note">Latency is for successful requests only. Failure rate is failed requests divided by all attempted requests. Change is After minus Before; failure-rate change is shown in percentage points (pp). A dash means no value was reported or could be calculated.</p>
-    </section>
-    $source
-    <p class="note"><a href="https://github.com/lilaclilac09/resilient-agent-client/blob/77db3324219f3be93a764bba820360f5551b59b3/docs/BAOLIANDENG.md">BaoLianDeng setup guide for macOS</a></p>
+    </div>
+    $context
+    $sections
+    <p class="note"><a href="https://github.com/lilaclilac09/resilient-agent-client/blob/86d382af98a9f2148723085538ea0c00c4b7f728/docs/BAOLIANDENG.md">BaoLianDeng setup guide for macOS</a> (<a href="https://github.com/lilaclilac09/resilient-agent-client/pull/4">PR #4</a>)</p>
   </main>
   <script>
-    const comparison = document.querySelector(".comparison");
-    comparison.addEventListener("focus", () => {
-      if (matchMedia("(max-width: 38rem)").matches) {
-        requestAnimationFrame(() => comparison.scrollIntoView({block: "start"}));
-      }
-    });
-    document.querySelector("#refresh-results").addEventListener("click", (event) => {
+    for (const comparison of document.querySelectorAll(".comparison")) {
+      comparison.addEventListener("focus", () => {
+        if (matchMedia("(max-width: 38rem)").matches) {
+          requestAnimationFrame(() => comparison.scrollIntoView({block: "start"}));
+        }
+      });
+    }
+    document.querySelector("#refresh-results")?.addEventListener("click", (event) => {
       if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
       event.preventDefault();
       location.reload();
@@ -132,7 +112,8 @@
     const revision = document.querySelector("main").dataset.revision;
     try {
       const revisionKey = "latency-revision:" + location.pathname;
-      const refreshed = performance.getEntriesByType("navigation")[0]?.type === "reload";
+      const refreshed = document.querySelector("#refresh-results") &&
+        performance.getEntriesByType("navigation")[0]?.type === "reload";
       if (refreshed && revision && sessionStorage.getItem(revisionKey) === revision) {
         const status = document.querySelector("#refresh-status");
         const checkedAt = new Date().toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});

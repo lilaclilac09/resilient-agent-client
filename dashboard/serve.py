@@ -15,9 +15,11 @@ from urllib.parse import urlsplit
 
 DIRECTORY = Path(__file__).resolve().parent
 TEMPLATE = Template((DIRECTORY / "index.html").read_text(encoding="utf-8"))
+PANEL_TEMPLATE = Template((DIRECTORY / "scenario.html").read_text(encoding="utf-8"))
 DEFAULT_INPUT_LABEL = "target/proxy-latency.json"
 CONFIGURED_INPUT_LABEL = "Configured export (RESULTS_PATH or --results)"
-DEFAULT_RESULTS = DIRECTORY.parent / DEFAULT_INPUT_LABEL
+BUNDLED_SCENARIOS = (("steady", "Steady proxy"), ("flap", "Flapping proxy"))
+REPOSITORY = "https://github.com/lilaclilac09/resilient-agent-client"
 FORMAT_HELP = "Follow the Before / after proxy latency dashboard format in README.md, then refresh."
 SOURCE_SCOPES = {
     "both": "Both runs (Before and After)",
@@ -70,6 +72,12 @@ def read_results(path):
         text_field(series, "label", f"{name}.")
         samples = series.get("samples")
         failures = series.get("failures")
+        if "failures" not in series and type(series.get("errors")) is int:
+            failures = series["failures"] = series.pop("errors")
+        if "max_recovery_ms" in series:
+            recovery = series["max_recovery_ms"]
+            if type(recovery) is not int or recovery < 0:
+                raise ResultsValidationError(f"Set {name}.max_recovery_ms to a non-negative integer in milliseconds.")
         for field, count in (("samples", samples), ("failures", failures)):
             if type(count) is not int or count < 0:
                 raise ResultsValidationError(f"Set {name}.{field} to a non-negative integer.")
@@ -148,7 +156,7 @@ def read_error_message(error):
     return f"Could not read the expected input ({reason}). Check that the export is a readable JSON file."
 
 
-def render(path, configured=False):
+def render_scenario(path, configured=False, *, scenario_id="comparison", title=None, input_label=None):
     rows = [metric_row(title, "—", "—") for title, *_ in PERCENTILES + COUNTS]
     rows.append(metric_row("Failure rate", "—", "—"))
     page = {
@@ -157,7 +165,7 @@ def render(path, configured=False):
         "before_label": "Baseline",
         "after_label": "Candidate",
         "source": "",
-        "input_label": CONFIGURED_INPUT_LABEL if configured else DEFAULT_INPUT_LABEL,
+        "input_label": input_label or (CONFIGURED_INPUT_LABEL if configured else DEFAULT_INPUT_LABEL),
         "help": "",
         "revision": "",
     }
@@ -196,8 +204,8 @@ def render(path, configured=False):
             after_label=escape(after["label"]),
             revision=sha256(json.dumps(data, sort_keys=True).encode("utf-8")).hexdigest(),
             source=(
-                "<section class='source' aria-labelledby='source-title'>"
-                "<h2 id='source-title'>Measurement source</h2><dl>"
+                "<section class='source'>"
+                "<h3>Measurement source</h3><dl>"
                 f"<dt>Applies to</dt><dd>{scope}</dd>"
                 f"<dt>Environment</dt><dd>{source['environment']}</dd>"
                 f"<dt>Measured at</dt><dd>{source['measured_at']}</dd>"
@@ -205,7 +213,65 @@ def render(path, configured=False):
                 "</dl></section>"
             ),
         )
-    return TEMPLATE.substitute(page, rows="".join(rows)).encode("utf-8")
+        if title:
+            rows.append(metric_row("Fail-fast rejections", "Not recorded", "Not recorded", "Not comparable"))
+        if scenario_id == "flap":
+            rows.append(comparison_row(
+                "Max observed recovery", before.get("max_recovery_ms"), after.get("max_recovery_ms"),
+                "{:,} ms", "{:+,} ms", ("Faster", "Slower"),
+            ))
+    state = f"<p>{page['state']}</p>" if title and page["state"] != "Measured comparison" else ""
+    if page["help"]:
+        page["help"] = f" {page['help']}"
+    section = PANEL_TEMPLATE.substitute(
+        page, id=scenario_id, title=title or page["state"], state_notice=state, rows="".join(rows),
+    )
+    return section, page["revision"]
+
+
+def bundled_paths():
+    return [DIRECTORY / "data" / f"proxy-latency-{scenario}.json" for scenario, _ in BUNDLED_SCENARIOS]
+
+
+def render(path=None, configured=False, *, offline=False):
+    context = ""
+    if path is None:
+        sources = (
+            ("bench-main.rs", "Benchmark source"),
+            ("make_export.py", "Export helper"),
+            ("raw-samples.jsonl", "Recorded trial summaries"),
+        )
+        links = " · ".join(
+            f'<a href="{REPOSITORY}/pull/7/files#diff-{sha256(f"dashboard/data/{filename}".encode()).hexdigest()}">{label}</a>'
+            for filename, label in sources
+        )
+        context = (
+            '<section class="panel" aria-labelledby="benchmark-context">'
+            '<h2 id="benchmark-context">Local loopback benchmark — not production</h2>'
+            '<p><strong>No demonstrated speedup.</strong> Successful-request p95 was nearly unchanged in the steady run and slightly higher in the flap run. '
+            'Failures remained frequent during flapping. These descriptive differences were not shown to be statistically significant.</p>'
+            '<p><strong>Before:</strong> main <code>b966dbb</code> · <strong>After:</strong> integrated candidate <code>86d382a</code></p>'
+            '<p>Each latency percentile is the median of five per-trial percentiles (24 agents, 10 seconds per trial); '
+            'successes and failures are summed across trials. Failures include client-side rejections, but the benchmark did not record a separate fail-fast count. '
+            'Recovery is the maximum observed time from proxy restart to the start of a later successful request.</p>'
+            '<nav aria-label="Benchmark scenarios"><a href="#steady">Steady proxy</a> · <a href="#flap">Flapping proxy</a></nav>'
+            f'<p class="note">{links} · <a href="{REPOSITORY}/tree/devin/1795160000-candidate-4-5-6">Combined candidate branch</a></p>'
+            '</section>'
+        )
+        sections = [
+            render_scenario(path, scenario_id=scenario, title=title, input_label=f"dashboard/data/{path.name}")
+            for (scenario, title), path in zip(BUNDLED_SCENARIOS, bundled_paths())
+        ]
+    else:
+        sections = [render_scenario(path, configured)]
+    rendered_sections, revisions = zip(*sections)
+    revision = sha256(" ".join(revisions).encode()).hexdigest() if any(revisions) else ""
+    return TEMPLATE.substitute(
+        context=context,
+        sections="".join(rendered_sections),
+        revision=revision,
+        refresh='<a href="" id="refresh-results">Refresh results</a>' if not offline else "Offline snapshot",
+    ).encode("utf-8")
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -238,12 +304,17 @@ def main():
     parser.add_argument("--results", type=Path, default=os.environ.get("RESULTS_PATH"))
     parser.add_argument("--port", type=int, default=os.environ.get("PORT", 8765))
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
+    parser.add_argument("--snapshot", type=Path, help="Write the bundled offline dashboard and exit.")
     args = parser.parse_args()
 
-    path = args.results if args.results is not None else DEFAULT_RESULTS
+    if args.snapshot:
+        args.snapshot.write_bytes(render(offline=True))
+        return
+    path = args.results
     with make_server(path, args.port, args.host, configured=args.results is not None) as server:
         print(f"Listening on http://{args.host}:{server.server_port}/", flush=True)
-        print(f"Reading {path.absolute()}", flush=True)
+        for input_path in (bundled_paths() if path is None else [path]):
+            print(f"Reading {input_path.absolute()}", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

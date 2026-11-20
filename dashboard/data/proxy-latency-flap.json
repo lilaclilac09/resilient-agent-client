@@ -1,0 +1,30 @@
+{
+  "scenario": "Same workload, proxy killed for 1 s every 3 s after a 2 s warmup; latency only over successful requests; errors include local breaker fail-fast rejections",
+  "source": {
+    "environment": "Linux VM, loopback fixture proxy (harness/loopback-fixtures ConnectProxy), not mihomo/BaoLianDeng, no external network",
+    "measured_at": "2026-11-20T07:09:32+00:00",
+    "command": "bench-<tree> flap 24 10 (standalone crate path-depending on agent-client + loopback-fixtures; source in bench-main.rs)"
+  },
+  "before": {
+    "label": "main b966dbb",
+    "samples": 3298,
+    "p50_ms": 80.83,
+    "p95_ms": 239.992,
+    "p99_ms": 322.87,
+    "success": 3298,
+    "errors": 14542,
+    "reps": 5,
+    "max_recovery_ms": 1813
+  },
+  "after": {
+    "label": "candidate #4+#5+#6 86d382a",
+    "samples": 3892,
+    "p50_ms": 80.541,
+    "p95_ms": 241.767,
+    "p99_ms": 338.123,
+    "success": 3892,
+    "errors": 13132,
+    "reps": 5,
+    "max_recovery_ms": 1874
+  }
+}

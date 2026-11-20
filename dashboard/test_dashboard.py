@@ -9,7 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.request import urlopen
 
-from serve import main, make_server
+from data.make_export import build_exports
+from serve import DIRECTORY, bundled_paths, main, make_server, read_results, render
 
 
 class DashboardSmokeTest(unittest.TestCase):
@@ -173,3 +174,35 @@ class DashboardSmokeTest(unittest.TestCase):
     def assert_metric(self, body, title, before, after, change):
         cells = "".join(f"<td role='cell'>{value}</td>" for value in (before, after, change))
         self.assertIn(f">{title}</th>{cells}</tr>", body)
+
+    def test_bundled_exports_match_recorded_trials_and_render(self):
+        records = [
+            json.loads(line)
+            for line in (DIRECTORY / "data" / "raw-samples.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(len(records), 20)
+        for path, (_, expected) in zip(
+            bundled_paths(), build_exports(records, "b966dbb", "86d382a", "2026-11-20T07:09:32+00:00"), strict=True,
+        ):
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), expected)
+            loaded = read_results(path)
+            for side in ("before", "after"):
+                self.assertEqual(loaded[side]["failures"], expected[side]["errors"])
+                self.assertNotIn("errors", loaded[side])
+        body = render().decode("utf-8")
+        self.assertIn('<h2 id="steady-title">Steady proxy</h2>', body)
+        self.assertIn('<h2 id="flap-title">Flapping proxy</h2>', body)
+        self.assertIn("Local loopback benchmark — not production", body)
+        self.assertIn("No demonstrated speedup.", body)
+        self.assert_metric(body, "95th percentile (p95)", "282.078 ms", "280.909 ms", "Faster (-1.169 ms)")
+        self.assert_metric(body, "95th percentile (p95)", "239.992 ms", "241.767 ms", "Slower (+1.775 ms)")
+        self.assert_metric(body, "Failed requests", "14,542", "13,132", "Fewer failures (-1,410)")
+        self.assert_metric(body, "Failure rate", "81.51%", "77.14%", "Lower failure rate (-4.38 pp)")
+        self.assert_metric(body, "Fail-fast rejections", "Not recorded", "Not recorded", "Not comparable")
+        self.assert_metric(body, "Max observed recovery", "1,813 ms", "1,874 ms", "Slower (+61 ms)")
+
+    def test_offline_snapshot_matches_bundled_dashboard_without_refresh_link(self):
+        snapshot = (DIRECTORY / "proxy-latency-offline.html").read_bytes()
+        self.assertEqual(snapshot, render(offline=True))
+        self.assertNotIn(b'id="refresh-results"', snapshot)
+        self.assertIn(b"Offline snapshot", snapshot)

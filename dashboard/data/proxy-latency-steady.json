@@ -1,0 +1,30 @@
+{
+  "scenario": "24 agents x 10 s, Client::send GET through a loopback HTTP CONNECT proxy fixture to a loopback keep-alive upstream; 5 interleaved reps per build; latency = per successful request wall time; values are the median across reps",
+  "source": {
+    "environment": "Linux VM, loopback fixture proxy (harness/loopback-fixtures ConnectProxy), not mihomo/BaoLianDeng, no external network",
+    "measured_at": "2026-11-20T07:09:32+00:00",
+    "command": "bench-<tree> steady 24 10 (standalone crate path-depending on agent-client + loopback-fixtures; source in bench-main.rs)"
+  },
+  "before": {
+    "label": "main b966dbb",
+    "samples": 9811,
+    "p50_ms": 85.12,
+    "p95_ms": 282.078,
+    "p99_ms": 417.172,
+    "success": 9811,
+    "errors": 0,
+    "reps": 5,
+    "max_recovery_ms": 0
+  },
+  "after": {
+    "label": "candidate #4+#5+#6 86d382a",
+    "samples": 9812,
+    "p50_ms": 86.157,
+    "p95_ms": 280.909,
+    "p99_ms": 387.03,
+    "success": 9812,
+    "errors": 0,
+    "reps": 5,
+    "max_recovery_ms": 0
+  }
+}
