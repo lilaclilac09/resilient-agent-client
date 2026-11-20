@@ -82,6 +82,12 @@ on each page load; use `--results /path/to/results.json` to read an
 export from another location. Until a measured export is available,
 both columns show dashes and the status is **Pending measurement**.
 The dashboard does not run a benchmark or use sample numbers.
+For an organization-only preview routed by a private proxy, set
+`HOST=0.0.0.0 PORT=8765 python3 dashboard/serve.py`.
+`RESULTS_PATH` sets the export location; `--host`, `--port` and
+`--results` override their corresponding environment variables.
+The dashboard itself does not provide authentication or TLS; do not
+expose it directly to the public internet.
 
 The measured export is a JSON object with these fields:
 
@@ -91,10 +97,17 @@ The measured export is a JSON object with these fields:
 | `source.environment` | String describing where the run took place (e.g. loopback fixture vs. real proxy app). |
 | `source.measured_at` | String containing the measurement timestamp, preferably ISO 8601. |
 | `source.command` | String containing the command used to produce the data. Use a reproducible command without secrets. |
-| `before`, `after` | Objects with `label` (string identifying the baseline or candidate configuration), `samples` (positive count of timed requests), `p50_ms` and `p95_ms` (finite, non-negative request latency percentiles in milliseconds). |
+| `before`, `after` | Objects with `label` (string identifying the baseline or candidate configuration) and the following fields. |
+| `before.samples`, `after.samples` | Non-negative integer counts of successful requests used to compute the percentiles. |
+| `before.failures`, `after.failures` | Non-negative integer counts of failed requests. Each configuration must have at least one success or failure. |
+| `p50_ms`, `p95_ms`, `p99_ms` in each configuration | Required success-latency percentiles in milliseconds, as finite non-negative numbers in ascending order. Set all three to `null` when the configuration had no successes. |
+| `errors` in each configuration (optional) | Object mapping error categories to positive integer counts that sum to `failures`. Omit if the breakdown was not recorded. |
 
 Report the same metric and workload for both configurations; the labels
 identify what actually changed rather than assuming the candidate is faster.
+The failure rate is `failures / (samples + failures)`; its signed change
+is in percentage points. If documented error breakdowns differ, the dashboard
+compares the union of categories and leaves unreported counts blank.
 Run the dashboard HTTP smoke checks with `python3 -B -m unittest discover -s dashboard`.
 
 ## Status

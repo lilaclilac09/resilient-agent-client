@@ -2,16 +2,24 @@
 import argparse
 import json
 import math
+import os
 from functools import partial
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from string import Template
+from urllib.parse import urlsplit
 
 
 DIRECTORY = Path(__file__).resolve().parent
 TEMPLATE = Template((DIRECTORY / "index.html").read_text(encoding="utf-8"))
 DEFAULT_RESULTS = DIRECTORY.parent / "target" / "proxy-latency.json"
+PERCENTILES = (
+    ("Median (p50)", "p50_ms"),
+    ("95th percentile (p95)", "p95_ms"),
+    ("99th percentile (p99)", "p99_ms"),
+)
+COUNTS = (("Successful requests", "samples"), ("Failed requests", "failures"))
 
 
 def object_field(parent, name):
@@ -41,27 +49,66 @@ def read_results(path):
         series = object_field(data, name)
         text_field(series, "label")
         samples = series.get("samples")
-        if type(samples) is not int or samples <= 0:
-            raise ValueError(f"{name}.samples must be a positive integer.")
-        for field in ("p50_ms", "p95_ms"):
+        failures = series.get("failures")
+        for field, count in (("samples", samples), ("failures", failures)):
+            if type(count) is not int or count < 0:
+                raise ValueError(f"{name}.{field} must be a non-negative integer.")
+        if samples + failures == 0:
+            raise ValueError(f"{name} must include at least one request outcome.")
+        latencies = []
+        for _, field in PERCENTILES:
             value = series.get(field)
-            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            if not samples:
+                if field not in series or value is not None:
+                    raise ValueError(f"{name}.{field} must be null when there are no successes.")
+            elif type(value) not in (int, float) or not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name}.{field} must be a finite, non-negative number.")
-        if series["p50_ms"] > series["p95_ms"]:
-            raise ValueError(f"{name}.p50_ms must not exceed {name}.p95_ms.")
+            latencies.append(value)
+        if samples and latencies != sorted(latencies):
+            raise ValueError(f"{name} must have p50_ms ≤ p95_ms ≤ p99_ms.")
+        if "errors" in series:
+            errors = object_field(series, "errors")
+            if any(
+                not category.strip() or type(count) is not int or count <= 0
+                for category, count in errors.items()
+            ) or sum(errors.values()) != failures:
+                raise ValueError(f"{name}.errors must map categories to positive counts adding up to failures.")
     return data
 
 
 def metric_row(title, before, after, change="—"):
-    return f"<tr><th scope='row'>{title}</th><td>{before}</td><td>{after}</td><td>{change}</td></tr>"
+    return f"<tr><th scope='row'>{escape(title)}</th><td>{before}</td><td>{after}</td><td>{change}</td></tr>"
+
+
+def comparison_row(title, before, after, value_format, delta_format):
+    delta = after - before if before is not None and after is not None else None
+    return metric_row(
+        title,
+        value_format.format(before) if before is not None else "—",
+        value_format.format(after) if after is not None else "—",
+        delta_format.format(delta) if delta is not None else "—",
+    )
+
+
+def measured_rows(before, after):
+    rows = [
+        comparison_row(title, before[field], after[field], "{:.3f} ms", "{:+.3f} ms")
+        for title, field in PERCENTILES
+    ]
+    for title, field in COUNTS:
+        rows.append(comparison_row(title, before[field], after[field], "{:,}", "{:+,}"))
+    rates = [100 * (s["failures"] / (s["samples"] + s["failures"])) for s in (before, after)]
+    rows.append(comparison_row("Failure rate", *rates, "{:.2f}%", "{:+.2f} pp"))
+    errors = [s.get("errors", {} if not s["failures"] else None) for s in (before, after)]
+    for category in sorted(set(errors[0] or {}) | set(errors[1] or {})):
+        counts = [e.get(category, 0) if e is not None else None for e in errors]
+        rows.append(comparison_row(f"Failed requests: {category}", *counts, "{:,}", "{:+,}"))
+    return rows
 
 
 def render(path):
-    rows = [
-        metric_row("Median (p50)", "—", "—"),
-        metric_row("95th percentile (p95)", "—", "—"),
-        metric_row("Measured requests", "—", "—"),
-    ]
+    rows = [metric_row(title, "—", "—") for title, _ in PERCENTILES + COUNTS]
+    rows.append(metric_row("Failure rate", "—", "—"))
     page = {
         "state": "Pending measurement",
         "message": "No measured comparison is available yet. Both columns will populate when the benchmark results are added.",
@@ -81,13 +128,7 @@ def render(path):
         page.update(state="Results unavailable", message=escape(str(error)))
     else:
         before, after = data["before"], data["after"]
-        rows = []
-        for title, field in (("Median (p50)", "p50_ms"), ("95th percentile (p95)", "p95_ms")):
-            a, b = before[field], after[field]
-            delta = b - a
-            change = f"{delta:+.3f} ms" if delta else "0.000 ms"
-            rows.append(metric_row(title, f"{a:.3f} ms", f"{b:.3f} ms", change))
-        rows.append(metric_row("Measured requests", f"{before['samples']:,}", f"{after['samples']:,}"))
+        rows = measured_rows(before, after)
         source = {name: escape(data["source"][name]) for name in ("environment", "measured_at", "command")}
         page.update(
             state="Measured comparison",
@@ -112,7 +153,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         super().__init__(*args, **kwargs)
 
     def do_GET(self):
-        if self.path != "/":
+        if urlsplit(self.path).path != "/":
             self.send_error(404)
             return
         body = render(self.results_path)
@@ -124,20 +165,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def make_server(results_path, port):
+def make_server(results_path, port, host="127.0.0.1"):
     return ThreadingHTTPServer(
-        ("127.0.0.1", port), partial(DashboardHandler, results_path=results_path)
+        (host, port), partial(DashboardHandler, results_path=results_path)
     )
 
 
 def main():
     parser = argparse.ArgumentParser(description="Serve the local proxy latency dashboard.")
-    parser.add_argument("--results", type=Path, default=DEFAULT_RESULTS)
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--results", type=Path, default=os.environ.get("RESULTS_PATH", DEFAULT_RESULTS))
+    parser.add_argument("--port", type=int, default=os.environ.get("PORT", 8765))
+    parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
     args = parser.parse_args()
 
-    with make_server(args.results, args.port) as server:
-        print(f"Open http://127.0.0.1:{server.server_port}/", flush=True)
+    with make_server(args.results, args.port, args.host) as server:
+        print(f"Listening on http://{args.host}:{server.server_port}/", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:
