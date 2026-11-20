@@ -80,7 +80,10 @@ From the repo root, run `python3 dashboard/serve.py` and open
 <http://127.0.0.1:8765/>. The dashboard reads `target/proxy-latency.json`
 on each page load; use `--results /path/to/results.json` to read an
 export from another location. Until a measured export is available,
-both columns show dashes and the status is **Pending measurement**.
+both columns show dashes. If the default export is missing, the status
+is **Pending measurement**; if an explicitly configured file is missing,
+the status is **Results file missing**. The startup log prints the full
+input path for the operator; the page shows only a safe input label.
 The dashboard does not run a benchmark or use sample numbers.
 For an organization-only preview routed by a private proxy, set
 `HOST=0.0.0.0 PORT=8765 python3 dashboard/serve.py`.

@@ -1,20 +1,28 @@
+import errno
+import io
 import json
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 from urllib.request import urlopen
 
-from serve import make_server
+from serve import main, make_server
 
 
 class DashboardSmokeTest(unittest.TestCase):
-    def check_dashboard(self, results=None):
+    def check_dashboard(self, results=None, *, configured=False, input_directory=False, raw=None):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "results.json"
-            if results is not None:
+            path = Path(directory) / "private-export.json"
+            if input_directory:
+                path.mkdir()
+            elif raw is not None:
+                path.write_bytes(raw)
+            elif results is not None:
                 path.write_text(json.dumps(results), encoding="utf-8")
-            with make_server(path, 0) as server:
+            with make_server(path, 0, configured=configured) as server:
                 worker = threading.Thread(target=server.serve_forever)
                 worker.start()
                 try:
@@ -26,6 +34,8 @@ class DashboardSmokeTest(unittest.TestCase):
                 finally:
                     server.shutdown()
                     worker.join()
+            self.assertNotIn(str(path), body)
+            self.assertNotIn(path.name, body)
         self.assertIn(">Before<", body)
         self.assertIn(">After<", body)
         return body
@@ -34,6 +44,7 @@ class DashboardSmokeTest(unittest.TestCase):
         body = self.check_dashboard()
         self.assertIn("Pending measurement", body)
         self.assertIn("<td>—</td><td>—</td><td>—</td>", body)
+        self.assertIn("Expected input: <code>target/proxy-latency.json</code>", body)
         for title in ("99th percentile (p99)", "Failed requests", "Failure rate"):
             self.assertIn(f">{title}</th><td>—</td><td>—</td><td>—</td>", body)
         self.assertNotIn("Measurement source", body)
@@ -88,7 +99,63 @@ class DashboardSmokeTest(unittest.TestCase):
         self.assertIn(">Failed requests: timeout</th><td>—</td><td>1</td><td>—</td>", body)
 
     def test_invalid_export_does_not_display_measurements(self):
-        body = self.check_dashboard({"scenario": "Incomplete export"})
+        body = self.check_dashboard({"scenario": "Incomplete export", "source": {"environment": ""}})
         self.assertIn("Results unavailable", body)
         self.assertIn("<td>—</td><td>—</td><td>—</td>", body)
         self.assertNotIn("Measurement source", body)
+        self.assertIn("Set source.environment to a non-empty string.", body)
+        self.assertIn("format in README.md", body)
+
+    def test_missing_configured_file_is_not_pending(self):
+        body = self.check_dashboard(configured=True)
+        self.assertIn("Results file missing", body)
+        self.assertNotIn("Pending measurement", body)
+        self.assertIn("No results file at the configured input.", body)
+        self.assertIn("Expected input: <code>Configured export (RESULTS_PATH or --results)</code>", body)
+        self.assertIn("restart with the correct RESULTS_PATH or --results", body)
+
+    def test_directory_input_has_a_specific_read_error(self):
+        body = self.check_dashboard(configured=True, input_directory=True)
+        self.assertIn("The expected input is a directory. Select a JSON results file instead.", body)
+        self.assertIn("format in README.md", body)
+
+    def test_permission_failure_does_not_print_os_paths(self):
+        error = PermissionError(errno.EACCES, "Permission denied", "/secret/server/input.json")
+        with patch.object(Path, "open", side_effect=error):
+            body = self.check_dashboard(configured=True)
+        self.assertIn("Permission denied while reading the expected input.", body)
+        self.assertIn("Grant the dashboard process read access", body)
+        self.assertNotIn("/secret/server/input.json", body)
+
+    def test_json_syntax_error_points_to_line_and_column(self):
+        body = self.check_dashboard(configured=True, raw=b"{\n?")
+        self.assertIn("Fix the JSON syntax at line 2, column 1", body)
+        self.assertIn("format in README.md", body)
+
+    def test_out_of_range_latency_identifies_the_field(self):
+        body = self.check_dashboard({
+            "scenario": "Smoke test fixture",
+            "source": {"environment": "fixture", "measured_at": "test time", "command": "test export"},
+            "before": {
+                "label": "baseline", "samples": 1, "failures": 0,
+                "p50_ms": 1, "p95_ms": 1, "p99_ms": 10 ** 400,
+            },
+        }, configured=True)
+        self.assertIn("Re-export before.p99_ms as a supported finite number in milliseconds.", body)
+        self.assertNotIn("Could not read", body)
+
+    def test_startup_logs_the_actual_input_path_and_uses_explicit_config(self):
+        for env, argv in (
+            ({"RESULTS_PATH": "/private/results.json", "HOST": "0.0.0.0", "PORT": "8123"}, ["serve.py"]),
+            (
+                {"RESULTS_PATH": "/unused/results.json", "HOST": "127.0.0.1", "PORT": "8011"},
+                ["serve.py", "--results", "/private/results.json", "--host", "0.0.0.0", "--port", "8123"],
+            ),
+        ):
+            with self.subTest(argv=argv), patch.dict("os.environ", env, clear=True), patch("sys.argv", argv):
+                with patch("serve.make_server") as make_server_mock, redirect_stdout(io.StringIO()) as output:
+                    make_server_mock.return_value.__enter__.return_value.server_port = 8123
+                    main()
+                make_server_mock.assert_called_once_with(Path("/private/results.json"), 8123, "0.0.0.0", configured=True)
+                self.assertIn("Listening on http://0.0.0.0:8123/", output.getvalue())
+                self.assertIn("Reading /private/results.json", output.getvalue())
