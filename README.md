@@ -80,9 +80,13 @@ resilient-agent-client/
 
 Run `bash harness/check-fetch-framing.sh` (Rust/Cargo required). This uses only
 local loopback servers, including a CONNECT proxy, and prints `PASS: <case>`
-for each of eight cases: chunked bodies with extensions/trailers and connection
+for each of nine cases: chunked bodies with extensions/trailers and connection
 reuse, close-delimited bodies, Content-Length, chunked through the proxy,
-body-size limits, empty bodies, malformed/truncated responses, and HEAD/204/304.
+body-size limits, empty bodies, malformed/truncated responses, HEAD/204/304,
+and the real MCP binary fetching chunked HTTPS over CONNECT via stdio. The
+MCP case generates a throwaway CA and localhost certificate, trusts that CA
+using the existing `AGENT_FETCH_CA_FILE` option, and sets `AGENT_FETCH_PROXY`
+to an explicit `http://` loopback proxy; TLS verification remains enabled.
 Any failure prints `FAIL: <case>` and exits nonzero. The MCP `resilient_fetch`
 tool uses this same client decoder for HTTP and HTTPS.
 

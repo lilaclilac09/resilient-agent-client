@@ -10,4 +10,11 @@ for case in chunked_with_extensions_trailers_and_reuse close_delimited content_l
         failed=1
     fi
 done
+case=chunked_https_fetch_over_proxy_stdio
+if cargo test -p agent-fetch-mcp --test stdio "$case" -- --exact; then
+    echo "PASS: $case"
+else
+    echo "FAIL: $case"
+    failed=1
+fi
 exit "$failed"
