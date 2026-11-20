@@ -74,6 +74,29 @@ resilient-agent-client/
   flapper's FD count out of process and opens no sockets itself, so the
   measurement cannot leak FDs into the runner.
 
+## Before / after proxy latency dashboard
+
+From the repo root, run `python3 dashboard/serve.py` and open
+<http://127.0.0.1:8765/>. The dashboard reads `target/proxy-latency.json`
+on each page load; use `--results /path/to/results.json` to read an
+export from another location. Until a measured export is available,
+both columns show dashes and the status is **Pending measurement**.
+The dashboard does not run a benchmark or use sample numbers.
+
+The measured export is a JSON object with these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `scenario` | String describing the shared workload, request timing boundaries, and proxy conditions. |
+| `source.environment` | String describing where the run took place (e.g. loopback fixture vs. real proxy app). |
+| `source.measured_at` | String containing the measurement timestamp, preferably ISO 8601. |
+| `source.command` | String containing the command used to produce the data. Use a reproducible command without secrets. |
+| `before`, `after` | Objects with `label` (string identifying the baseline or candidate configuration), `samples` (positive count of timed requests), `p50_ms` and `p95_ms` (finite, non-negative request latency percentiles in milliseconds). |
+
+Report the same metric and workload for both configurations; the labels
+identify what actually changed rather than assuming the candidate is faster.
+Run the dashboard HTTP smoke checks with `python3 -B -m unittest discover -s dashboard`.
+
 ## Status
 
 All four modules are implemented and composed in `crates/agent-client`

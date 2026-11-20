@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Proxy latency · Before / After</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font: 16px/1.5 system-ui, sans-serif;
+      background: #f3f5f8;
+      color: #192b44;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 58rem; margin: auto; padding: 3rem 1.25rem; }
+    header {
+      padding: 2rem;
+      border-radius: 1rem;
+      background: #162c49;
+      color: white;
+    }
+    .eyebrow { color: #b9d2ec; font-size: .75rem; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
+    h1 { margin: .25rem 0 .4rem; font-size: clamp(2rem, 6vw, 3rem); line-height: 1.15; }
+    header p { margin: 0; color: #dde9f7; }
+    .panel, .source {
+      margin-top: 1.25rem;
+      padding: 1.5rem;
+      border: 1px solid #dce3ec;
+      border-radius: 1rem;
+      background: white;
+    }
+    .status { display: flex; justify-content: space-between; gap: .5rem 1rem; flex-wrap: wrap; align-items: baseline; }
+    h2 { margin: 0; font-size: 1.125rem; }
+    a { color: #235486; text-underline-offset: .15em; }
+    p { margin: .5rem 0 1.25rem; }
+    .comparison { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; text-align: left; font-variant-numeric: tabular-nums; }
+    th, td { padding: .85rem .65rem; border-bottom: 1px solid #e0e7ef; }
+    thead { background: #eaf0f7; }
+    thead small { display: block; color: #4d6076; font-weight: 400; overflow-wrap: anywhere; }
+    td { white-space: nowrap; }
+    .note { color: #4d6076; margin: 1rem 0 0; font-size: .875rem; }
+    dl { margin: .75rem 0 0; }
+    dt { font-weight: 600; }
+    dd { margin: 0 0 .75rem; overflow-wrap: anywhere; }
+    dd:last-child { margin-bottom: 0; }
+    @media (max-width: 38rem) {
+      main { padding: 1rem .75rem; }
+      header, .panel, .source { padding: 1rem; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">Resilient Agent Client</p>
+      <h1>Proxy latency</h1>
+      <p>Compare request latency for the baseline and candidate proxy configurations.</p>
+    </header>
+    <section class="panel" aria-labelledby="comparison-title">
+      <div class="status">
+        <h2 id="comparison-title">$state</h2>
+        <a href="/">Refresh results</a>
+      </div>
+      <p>$message</p>
+      <div class="comparison" tabindex="0" role="region" aria-label="Before and after latency">
+        <table aria-label="Proxy request latency comparison">
+          <thead>
+            <tr>
+              <th scope="col">Metric</th>
+              <th scope="col">Before<small>$before_label</small></th>
+              <th scope="col">After<small>$after_label</small></th>
+              <th scope="col">Change</th>
+            </tr>
+          </thead>
+          <tbody>$rows</tbody>
+        </table>
+      </div>
+      <p class="note">Latency is shown in milliseconds. Change is After minus Before; a negative value means lower latency.</p>
+    </section>
+    $source
+  </main>
+</body>
+</html>
