@@ -2,7 +2,9 @@
 //! fixtures only.
 
 use loopback_fixtures::{ConnectProxy, Upstream};
-use std::io::Read;
+use std::fs::{self, File};
+use std::io::{self, Read};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -10,9 +12,37 @@ use std::sync::Arc;
 /// answers `secure <path>` on keep-alive connections.
 struct TlsUpstream {
     port: u16,
-    ca_file: std::path::PathBuf,
+    ca_file: FixtureCa,
     peak: Arc<AtomicUsize>,
     accepted: Arc<AtomicUsize>,
+}
+
+struct FixtureCa(PathBuf);
+
+impl FixtureCa {
+    fn write(pem: &str) -> io::Result<Self> {
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir();
+        loop {
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let path = dir.join(format!("afm-ca-{}-{id}.pem", std::process::id()));
+            match File::create_new(&path) {
+                Ok(mut file) => {
+                    let ca = Self(path);
+                    file.write_all(pem.as_bytes())?;
+                    return Ok(ca);
+                }
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err),
+            }
+        }
+    }
+}
+
+impl Drop for FixtureCa {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 fn tls_upstream() -> TlsUpstream {
@@ -31,12 +61,7 @@ fn tls_upstream_with_framing(chunked: bool) -> TlsUpstream {
         .unwrap()
         .signed_by(&leaf_key, &ca_cert, &ca_key)
         .unwrap();
-    let ca_file = std::env::temp_dir().join(format!(
-        "afm-ca-{}-{}.pem",
-        std::process::id(),
-        leaf_key.serialize_der().len() ^ rand_suffix()
-    ));
-    std::fs::write(&ca_file, ca_cert.pem()).unwrap();
+    let ca_file = FixtureCa::write(&ca_cert.pem()).unwrap();
     let cfg = Arc::new(
         rustls::ServerConfig::builder()
             .with_no_client_auth()
@@ -109,13 +134,6 @@ fn tls_upstream_with_framing(chunked: bool) -> TlsUpstream {
         peak,
         accepted,
     }
-}
-
-fn rand_suffix() -> usize {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos() as usize
 }
 
 fn call(id: i64, args: Value) -> Value {
@@ -218,7 +236,7 @@ fn chunked_https_fetch_over_proxy_stdio() {
             "AGENT_FETCH_PROXY",
             format!("http://127.0.0.1:{}", proxy.port),
         ),
-        ("AGENT_FETCH_CA_FILE", up.ca_file.display().to_string()),
+        ("AGENT_FETCH_CA_FILE", up.ca_file.0.display().to_string()),
         (
             "AGENT_FETCH_ALLOW",
             format!("https://localhost:{}", up.port),
@@ -238,7 +256,6 @@ fn chunked_https_fetch_over_proxy_stdio() {
     );
     assert_eq!(proxy.total_tunnels(), 1, "fetch did not use CONNECT");
     assert_eq!(up.accepted.load(Ordering::SeqCst), 1);
-    std::fs::remove_file(&up.ca_file).unwrap();
 }
 
 #[test]
@@ -248,7 +265,7 @@ fn proxy_check_requires_the_explicit_proxy_before_dialing() {
     let mut m = Mcp::start(&[
         ("HTTPS_PROXY", format!("http://{}", proxy.addr())),
         ("NO_PROXY", "*".into()),
-        ("AGENT_FETCH_CA_FILE", up.ca_file.display().to_string()),
+        ("AGENT_FETCH_CA_FILE", up.ca_file.0.display().to_string()),
         (
             "AGENT_FETCH_ALLOW",
             format!("https://localhost:{}", up.port),
@@ -289,7 +306,7 @@ fn proxy_check_reports_verified_route_and_does_not_fall_back() {
     let mut m = Mcp::start(&[
         ("AGENT_FETCH_PROXY", format!("http://{}", proxy.addr())),
         ("NO_PROXY", "*".into()),
-        ("AGENT_FETCH_CA_FILE", up.ca_file.display().to_string()),
+        ("AGENT_FETCH_CA_FILE", up.ca_file.0.display().to_string()),
         (
             "AGENT_FETCH_ALLOW",
             format!("https://localhost:{}", up.port),
@@ -366,7 +383,7 @@ fn concurrent_tool_calls_share_one_bounded_client_through_the_proxy() {
             "AGENT_FETCH_PROXY",
             format!("http://127.0.0.1:{}", proxy.port),
         ),
-        ("AGENT_FETCH_CA_FILE", up.ca_file.display().to_string()),
+        ("AGENT_FETCH_CA_FILE", up.ca_file.0.display().to_string()),
         (
             "AGENT_FETCH_ALLOW",
             format!("https://localhost:{}", up.port),
@@ -410,7 +427,7 @@ fn concurrent_tool_calls_share_one_bounded_client_through_the_proxy() {
 fn default_deny_and_exact_https_origins_only() {
     let up = tls_upstream();
     let plain = Upstream::start("plain").unwrap();
-    let ca = ("AGENT_FETCH_CA_FILE", up.ca_file.display().to_string());
+    let ca = ("AGENT_FETCH_CA_FILE", up.ca_file.0.display().to_string());
     // No allowlist: everything is denied without a connection.
     let mut m = Mcp::start(std::slice::from_ref(&ca));
     m.init();
@@ -511,7 +528,7 @@ fn proxy_down_fails_fast_with_a_tool_error() {
             "AGENT_FETCH_PROXY",
             format!("http://127.0.0.1:{}", proxy.port),
         ),
-        ("AGENT_FETCH_CA_FILE", up.ca_file.display().to_string()),
+        ("AGENT_FETCH_CA_FILE", up.ca_file.0.display().to_string()),
         (
             "AGENT_FETCH_ALLOW",
             format!("https://localhost:{}", up.port),
