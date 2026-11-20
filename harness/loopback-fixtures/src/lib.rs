@@ -11,7 +11,7 @@
 //! cannot reach the internet.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -115,6 +115,7 @@ impl Drop for Upstream {
 }
 
 fn serve(sock: TcpStream, name: &str, requests: &AtomicUsize) -> io::Result<()> {
+    sock.set_nonblocking(false)?;
     sock.set_read_timeout(Some(Duration::from_secs(30)))?;
     let mut w = sock.try_clone()?;
     let mut r = BufReader::new(sock);
@@ -267,16 +268,17 @@ impl Drop for ConnectProxy {
     }
 }
 
-fn is_loopback_target(target: &str) -> Option<SocketAddr> {
-    let addr = target.to_socket_addrs().ok()?.next()?;
-    let lo = match addr.ip() {
-        IpAddr::V4(v) => v.is_loopback(),
-        IpAddr::V6(v) => v.is_loopback(),
-    };
-    lo.then_some(addr)
+fn loopback_targets(target: &str) -> impl Iterator<Item = SocketAddr> {
+    target
+        .to_socket_addrs()
+        .into_iter()
+        .flatten()
+        .filter(|addr| addr.ip().is_loopback())
 }
 
 fn tunnel(client: TcpStream, inner: &ProxyInner) -> io::Result<()> {
+    // BSD can inherit nonblocking mode from the listening socket.
+    client.set_nonblocking(false)?;
     client.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut r = BufReader::new(client.try_clone()?);
     let mut line = String::new();
@@ -293,17 +295,17 @@ fn tunnel(client: TcpStream, inner: &ProxyInner) -> io::Result<()> {
         w.write_all(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")?;
         return Ok(());
     };
-    let Some(addr) = is_loopback_target(target) else {
+    let mut addrs = loopback_targets(target).peekable();
+    if addrs.peek().is_none() {
         inner.refused_targets.fetch_add(1, Ordering::SeqCst);
         w.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n")?;
         return Ok(());
-    };
-    let upstream = match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
-        Ok(u) => u,
-        Err(_) => {
-            w.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")?;
-            return Ok(());
-        }
+    }
+    let Some(upstream) =
+        addrs.find_map(|addr| TcpStream::connect_timeout(&addr, Duration::from_secs(2)).ok())
+    else {
+        w.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")?;
+        return Ok(());
     };
     w.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
     client.set_read_timeout(None)?;

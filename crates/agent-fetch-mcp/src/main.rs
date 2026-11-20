@@ -12,15 +12,14 @@
 //! - `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`: proxy, e.g.
 //!   mihomo's `http://127.0.0.1:<mixed-port>` (loopback stays direct).
 //! - `AGENT_FETCH_PROXY=http://host:port`: use this proxy for every host,
-//!   loopback included (used by the local tests).
+//!   loopback included, without bypass or direct fallback.
 //! - `AGENT_FETCH_CA_FILE=/path/ca.pem`: extra trusted CA (PEM).
 //! - `AGENT_FETCH_ALLOW=https://a.example,https://b.example:8443`: the
 //!   only origins the tool may reach (exact match, HTTPS only). Unset or
 //!   empty denies every call. Redirects are returned, never followed.
 
 use agent_client::{
-    parse_http_proxy_url, Client, ClientConfig, ClientError, HttpConnectProxy, ProxyMode, Request,
-    Tls,
+    Client, ClientConfig, ClientError, HttpConnectProxy, Origin, ProxyMode, Request, Tls,
 };
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -102,36 +101,66 @@ impl Allowlist {
     }
 }
 
-const ALLOWED_ARGS: [&str; 3] = ["url", "method", "max_chars"];
+const ALLOWED_ARGS: [&str; 4] = ["url", "method", "max_chars", "require_proxy"];
 
-fn build_client() -> Result<Client, String> {
+struct FetchClient {
+    client: Client,
+    explicit_proxy: Option<Origin>,
+}
+
+fn parse_explicit_proxy(value: &str) -> Option<Origin> {
+    let authority = value.trim().strip_prefix("http://")?;
+    let authority = authority.strip_suffix('/').unwrap_or(authority);
+    let (host, _) = authority.rsplit_once(':')?;
+    if let Some(ip) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        ip.parse::<std::net::Ipv6Addr>().ok()?;
+    } else if host.is_empty()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+    {
+        return None;
+    }
+    Origin::parse(authority).filter(|origin| origin.port != 0)
+}
+
+fn build_client() -> Result<FetchClient, String> {
     let mut cfg = ClientConfig {
         logger: Some(Arc::new(|line: &str| eprintln!("agent-fetch-mcp: {line}"))),
         ..ClientConfig::default()
     };
-    if let Ok(p) = std::env::var("AGENT_FETCH_PROXY") {
-        let origin =
-            parse_http_proxy_url(&p).ok_or("AGENT_FETCH_PROXY must be http://host:port")?;
-        cfg.proxy = ProxyMode::Http(HttpConnectProxy::new(origin));
+    let invalid_proxy =
+        "AGENT_FETCH_PROXY must be an HTTP proxy address such as http://127.0.0.1:12345. Use your proxy app's active address.";
+    let explicit_proxy = match std::env::var("AGENT_FETCH_PROXY") {
+        Ok(value) => Some(parse_explicit_proxy(&value).ok_or(invalid_proxy)?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => return Err(invalid_proxy.into()),
+    };
+    if let Some(origin) = &explicit_proxy {
+        cfg.proxy = ProxyMode::Http(HttpConnectProxy::new(origin.clone()));
     }
     if let Ok(path) = std::env::var("AGENT_FETCH_CA_FILE") {
         let pem = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
         cfg.tls = Tls::with_extra_ca_pem(&pem)?;
     }
-    Client::new(cfg)
+    Ok(FetchClient {
+        client: Client::new(cfg)?,
+        explicit_proxy,
+    })
 }
 
 fn tool_definition() -> Value {
     json!({
         "name": "resilient_fetch",
         "title": "Resilient fetch",
-        "description": "Fetch an http(s) URL with GET or HEAD through the shared resilient client: bounded sockets per origin, retry budget, circuit breaker, verified TLS, local proxy from HTTPS_PROXY. Returns the status line and the (truncated) body.",
+        "description": "Fetch an allowed HTTPS URL with GET or HEAD through the shared resilient client. To check a local proxy, set require_proxy to true: the request requires AGENT_FETCH_PROXY and reports the route without falling back to direct.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "url": { "type": "string", "description": "http:// or https:// URL" },
+                "url": { "type": "string", "description": "Allowed https:// URL" },
                 "method": { "type": "string", "enum": ["GET", "HEAD"], "default": "GET" },
-                "max_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "default": DEFAULT_MAX_CHARS }
+                "max_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "default": DEFAULT_MAX_CHARS },
+                "require_proxy": { "type": "boolean", "default": false, "description": "Require the operator's explicit AGENT_FETCH_PROXY and report the proxy used." }
             },
             "additionalProperties": false,
             "required": ["url"]
@@ -141,7 +170,7 @@ fn tool_definition() -> Value {
 }
 
 /// Result of `tools/call` for `resilient_fetch` (MCP tool result object).
-pub fn call_fetch(client: &Client, allow: &Allowlist, args: &Value) -> Value {
+fn call_fetch(fetch: &FetchClient, allow: &Allowlist, args: &Value) -> Value {
     let text_result = |text: String, is_error: bool| json!({ "content": [{ "type": "text", "text": text }], "isError": is_error });
     let Some(url) = args.get("url").and_then(Value::as_str) else {
         return text_result("missing string argument `url`".into(), true);
@@ -154,6 +183,19 @@ pub fn call_fetch(client: &Client, allow: &Allowlist, args: &Value) -> Value {
     {
         return text_result(format!("unknown argument `{extra}`"), true);
     }
+    let checked_proxy = match args.get("require_proxy") {
+        None | Some(Value::Bool(false)) => None,
+        Some(Value::Bool(true)) => match &fetch.explicit_proxy {
+            Some(proxy) => Some(proxy),
+            None => {
+                return text_result(
+                    "No explicit proxy is configured; no request was sent. Set AGENT_FETCH_PROXY in Cursor's MCP configuration to http:// followed by the proxy app's active address, then restart the MCP server.".into(),
+                    true,
+                )
+            }
+        },
+        _ => return text_result("`require_proxy` must be true or false".into(), true),
+    };
     match agent_client::parse_url(url) {
         Ok((agent_client::Scheme::Https, origin, _)) if allow.allows(&origin.host, origin.port) => {}
         Ok((agent_client::Scheme::Https, origin, _)) => {
@@ -179,26 +221,45 @@ pub fn call_fetch(client: &Client, allow: &Allowlist, args: &Value) -> Value {
         .unwrap_or(DEFAULT_MAX_CHARS);
     let mut req = Request::get("/");
     req.method = method.to_string();
-    match client.send_url(url, req) {
+    match fetch.client.send_url(url, req) {
         Ok(resp) => {
             let body = String::from_utf8_lossy(&resp.body);
             let mut text: String = body.chars().take(max_chars).collect();
             if body.chars().count() > max_chars {
                 text.push_str("\n[truncated]");
             }
+            let route = checked_proxy
+                .map(|proxy| {
+                    format!("\nHTTPS response via HTTP proxy {proxy}; no direct fallback.")
+                })
+                .unwrap_or_default();
             text_result(
                 format!(
-                    "HTTP {} ({} attempt(s))\n\n{text}",
+                    "HTTP {} ({} attempt(s)){route}\n\n{text}",
                     resp.status, resp.attempts
                 ),
                 !(200..400).contains(&resp.status),
             )
         }
-        Err(e @ ClientError::CircuitOpen { .. }) => text_result(
-            format!("{e}; failing fast without a request, retry later"),
-            true,
-        ),
-        Err(e) => text_result(e.to_string(), true),
+        Err(e) => {
+            let mut message = match e {
+                ClientError::CircuitOpen { .. } => {
+                    format!("{e}; failing fast without a request, retry later")
+                }
+                _ => e.to_string(),
+            };
+            if let Some(proxy) = checked_proxy {
+                message.push_str(&format!(
+                    "\nProxy check failed (HTTP proxy {proxy}; no direct fallback)."
+                ));
+                message.push_str(if matches!(e, ClientError::Tls(_)) {
+                    " Check the destination's TLS certificate; don't disable verification."
+                } else {
+                    " Check that the proxy app is connected and its active address matches AGENT_FETCH_PROXY."
+                });
+            }
+            text_result(message, true)
+        }
     }
 }
 
@@ -248,7 +309,7 @@ fn handle_sync(msg: &Value) -> Option<Value> {
                     "protocolVersion": version,
                     "capabilities": { "tools": { "listChanged": false } },
                     "serverInfo": { "name": "agent-fetch-mcp", "version": env!("CARGO_PKG_VERSION") },
-                    "instructions": "Use resilient_fetch for web requests so every agent shares bounded, retry-budgeted connections through the local proxy."
+                    "instructions": "Use resilient_fetch for allowed HTTPS requests. To verify an explicitly configured local proxy, call it with require_proxy set to true."
                 }),
             )
         }
