@@ -106,6 +106,27 @@ fn malformed_or_truncated_bodies_fail() {
 }
 
 #[test]
+fn chunk_extensions_allow_bad_whitespace() {
+    for reply in [
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5 ;foo=bar\r\nhello\r\n0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\t ;foo=bar \t\r\nhello\r\n0 \t;end=yes\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5 \t\r\nhello\r\n0 \t\r\n\r\n",
+    ] {
+        assert_eq!(check(reply, ProxyMode::Direct, 5).unwrap().body, b"hello");
+    }
+    for reply in [
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n \t;foo=bar\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5g ;foo=bar\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n 5;foo=bar\r\n",
+    ] {
+        assert!(matches!(
+            check(reply, ProxyMode::Direct, 5),
+            Err(ClientError::Protocol(_))
+        ));
+    }
+}
+
+#[test]
 fn truncated_chunk_metadata_is_a_network_failure() {
     for reply in [
         "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n",

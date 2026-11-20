@@ -675,7 +675,11 @@ fn read_chunked(r: &mut impl BufRead, max_body: usize) -> Result<Vec<u8>, Fail> 
         let line = line
             .strip_suffix("\r\n")
             .ok_or_else(|| invalid_body("invalid chunk size line"))?;
-        let size = line.split(';').next().unwrap_or("");
+        let size = line
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches([' ', '\t']);
         if size.is_empty() || !size.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(invalid_body("invalid chunk size"));
         }
