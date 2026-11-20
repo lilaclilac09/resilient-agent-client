@@ -72,7 +72,9 @@ fn tls_upstream_with_framing(chunked: bool) -> TlsUpstream {
                     while let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
                         let head = String::from_utf8_lossy(&buf[..end]).to_string();
                         buf.drain(..end + 4);
-                        let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                        let mut parts = head.split_whitespace();
+                        let method = parts.next();
+                        let path = parts.next().unwrap_or("/");
                         let body = format!("secure {path}");
                         if chunked {
                             let _ = tls.write_all(
@@ -87,9 +89,12 @@ fn tls_upstream_with_framing(chunked: bool) -> TlsUpstream {
                         } else {
                             let _ = write!(
                                 tls,
-                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
                                 body.len()
                             );
+                            if method != Some("HEAD") {
+                                let _ = tls.write_all(body.as_bytes());
+                            }
                         }
                         let _ = tls.flush();
                     }
@@ -136,6 +141,11 @@ impl Mcp {
             "http_proxy",
             "ALL_PROXY",
             "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+            "AGENT_FETCH_PROXY",
+            "AGENT_FETCH_ALLOW",
+            "AGENT_FETCH_CA_FILE",
         ] {
             cmd.env_remove(v);
         }
@@ -191,6 +201,10 @@ fn lifecycle_and_tool_listing_follow_the_spec() {
     let list = m.recv();
     assert_eq!(list["id"], 2);
     assert_eq!(list["result"]["tools"][0]["name"], "resilient_fetch");
+    assert_eq!(
+        list["result"]["tools"][0]["inputSchema"]["properties"]["require_proxy"]["type"],
+        "boolean"
+    );
     m.send(json!({"jsonrpc":"2.0","id":3,"method":"nope"}));
     assert_eq!(m.recv()["error"]["code"], -32601);
 }
@@ -225,6 +239,122 @@ fn chunked_https_fetch_over_proxy_stdio() {
     assert_eq!(proxy.total_tunnels(), 1, "fetch did not use CONNECT");
     assert_eq!(up.accepted.load(Ordering::SeqCst), 1);
     std::fs::remove_file(&up.ca_file).unwrap();
+}
+
+#[test]
+fn proxy_check_requires_the_explicit_proxy_before_dialing() {
+    let up = tls_upstream();
+    let proxy = ConnectProxy::start(0).unwrap();
+    let mut m = Mcp::start(&[
+        ("HTTPS_PROXY", format!("http://{}", proxy.addr())),
+        ("NO_PROXY", "*".into()),
+        ("AGENT_FETCH_CA_FILE", up.ca_file.display().to_string()),
+        (
+            "AGENT_FETCH_ALLOW",
+            format!("https://localhost:{}", up.port),
+        ),
+    ]);
+    m.init();
+    let url = format!("https://localhost:{}/", up.port);
+    for (id, required, expected) in [
+        (
+            2,
+            json!(true),
+            "No explicit proxy is configured; no request was sent",
+        ),
+        (3, json!("true"), "`require_proxy` must be true or false"),
+    ] {
+        m.send(call(
+            id,
+            json!({"url": url, "method": "HEAD", "require_proxy": required}),
+        ));
+        let r = m.recv();
+        assert_eq!(r["result"]["isError"], true, "{r}");
+        assert!(
+            r["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(expected),
+            "{r}"
+        );
+    }
+    assert_eq!(up.accepted.load(Ordering::SeqCst), 0);
+    assert_eq!(proxy.total_tunnels(), 0);
+}
+
+#[test]
+fn proxy_check_reports_verified_route_and_does_not_fall_back() {
+    let up = tls_upstream();
+    let proxy = ConnectProxy::start(0).unwrap();
+    let mut m = Mcp::start(&[
+        ("AGENT_FETCH_PROXY", format!("http://{}", proxy.addr())),
+        ("NO_PROXY", "*".into()),
+        ("AGENT_FETCH_CA_FILE", up.ca_file.display().to_string()),
+        (
+            "AGENT_FETCH_ALLOW",
+            format!("https://localhost:{}", up.port),
+        ),
+    ]);
+    m.init();
+    let args = json!({
+        "url": format!("https://localhost:{}/", up.port),
+        "method": "HEAD",
+        "require_proxy": true,
+    });
+    m.send(call(2, args.clone()));
+    let r = m.recv();
+    assert_eq!(r["result"]["isError"], false, "{r}");
+    assert_eq!(
+        r["result"]["content"][0]["text"],
+        format!(
+            "HTTP 200 (1 attempt(s))\nHTTPS response via HTTP proxy {}; no direct fallback.\n\n",
+            proxy.addr()
+        )
+    );
+    assert_eq!(proxy.total_tunnels(), 1);
+
+    proxy.kill();
+    m.send(call(3, args));
+    let r = m.recv();
+    assert_eq!(r["result"]["isError"], true, "{r}");
+    let details = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(details.contains("Proxy check failed"), "{r}");
+    assert!(
+        details.contains("active address matches AGENT_FETCH_PROXY"),
+        "{r}"
+    );
+    assert_eq!(
+        up.accepted.load(Ordering::SeqCst),
+        1,
+        "used the direct route"
+    );
+}
+
+#[test]
+fn invalid_explicit_proxy_refuses_startup_with_a_fix() {
+    for bad in [
+        "",
+        "socks5://127.0.0.1:12345",
+        "http://127.0.0.1",
+        "http://127.0.0.1:0",
+        "http://127.0.0.1:not-a-port",
+        "http://127.0.0.1:12345/path",
+        "http://name:password@127.0.0.1:12345",
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_agent-fetch-mcp"))
+            .env("AGENT_FETCH_ALLOW", "https://example.com")
+            .env("AGENT_FETCH_PROXY", bad)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{bad}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("Use your proxy app's active address."),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("password"), "{stderr}");
+    }
 }
 
 #[test]
