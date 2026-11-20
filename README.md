@@ -105,14 +105,14 @@ The measured export is a JSON object with these fields:
 | `source.measured_at` | String containing the measurement timestamp, preferably ISO 8601. |
 | `source.command` | String containing the command used to produce the data. Use a reproducible command without secrets. |
 | `source.scope` | `both` (default), `before`, or `after`: which run or runs the source describes. |
-| `before`, `after` | Objects with `label` (string identifying the baseline or candidate configuration) and the following fields. |
+| `before`, `after` | Objects with `label` (string identifying the baseline or candidate client revision) and the following fields. |
 | `before.samples`, `after.samples` | Non-negative integer counts of successful requests used to compute the percentiles. |
-| `before.failures`, `after.failures` | Non-negative integer counts of failed requests. Each configuration must have at least one success or failure. |
-| `p50_ms`, `p95_ms`, `p99_ms` in each configuration | Required success-latency percentiles in milliseconds, as finite non-negative numbers in ascending order. Set all three to `null` when the configuration had no successes. |
-| `errors` in each configuration (optional) | Object mapping error categories to positive integer counts that sum to `failures`. Omit if the breakdown was not recorded. |
+| `before.failures`, `after.failures` | Non-negative integer counts of failed requests. Each revision must have at least one success or failure. |
+| `p50_ms`, `p95_ms`, `p99_ms` in each revision | Required success-latency percentiles in milliseconds, as finite non-negative numbers in ascending order. Set all three to `null` when the run had no successes. |
+| `errors` in each revision (optional) | Object mapping error categories to positive integer counts that sum to `failures`. Omit if the breakdown was not recorded. |
 | `max_recovery_ms` (recorded flap export) | Non-negative integer maximum observed time in milliseconds from proxy restart to the start of a later successful request. |
 
-Report the same metric and workload for both configurations; the labels
+Report the same metric and workload for both revisions; the labels
 identify what actually changed rather than assuming the candidate is faster.
 The failure rate is `failures / (samples + failures)`; its signed change
 is in percentage points. If documented error breakdowns differ, the dashboard

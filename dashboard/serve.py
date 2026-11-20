@@ -32,8 +32,8 @@ PERCENTILES = (
     ("99th percentile (p99)", "p99_ms"),
 )
 COUNTS = (
-    ("Successful requests", "samples", ("Fewer successes", "More successes")),
-    ("Failed requests", "failures", ("Fewer failures", "More failures")),
+    ("Successful requests", "samples", ("fewer successes", "more successes")),
+    ("Failed requests", "failures", ("fewer failures", "more failures")),
 )
 
 
@@ -121,8 +121,11 @@ def comparison_row(title, before, after, value_format, delta_format, directions)
         change = "Not comparable"
     else:
         delta = after - before
-        direction = directions[0] if delta < 0 else directions[1] if delta > 0 else "No change"
-        change = f"{direction} ({delta_format.format(delta)})" if delta else direction
+        if delta:
+            direction = directions[0] if delta < 0 else directions[1]
+            change = f"Observed: {direction} ({delta_format.format(delta)})"
+        else:
+            change = "Observed: no change"
     return metric_row(
         title,
         value_format.format(before) if before is not None else "—",
@@ -133,17 +136,17 @@ def comparison_row(title, before, after, value_format, delta_format, directions)
 
 def measured_rows(before, after):
     rows = [
-        comparison_row(title, before[field], after[field], "{:.3f} ms", "{:+.3f} ms", ("Faster", "Slower"))
+        comparison_row(title, before[field], after[field], "{:.3f} ms", "{:+.3f} ms", ("faster", "slower"))
         for title, field in PERCENTILES
     ]
     for title, field, directions in COUNTS:
         rows.append(comparison_row(title, before[field], after[field], "{:,}", "{:+,}", directions))
     rates = [100 * (s["failures"] / (s["samples"] + s["failures"])) for s in (before, after)]
-    rows.append(comparison_row("Failure rate", *rates, "{:.2f}%", "{:+.2f} pp", ("Lower failure rate", "Higher failure rate")))
+    rows.append(comparison_row("Failure rate", *rates, "{:.2f}%", "{:+.2f} pp", ("lower failure rate", "higher failure rate")))
     errors = [s.get("errors", {} if not s["failures"] else None) for s in (before, after)]
     for category in sorted(set(errors[0] or {}) | set(errors[1] or {})):
         counts = [e.get(category, 0) if e is not None else None for e in errors]
-        rows.append(comparison_row(f"Failed requests: {category}", *counts, "{:,}", "{:+,}", ("Fewer failures", "More failures")))
+        rows.append(comparison_row(f"Failed requests: {category}", *counts, "{:,}", "{:+,}", ("fewer failures", "more failures")))
     return rows
 
 
@@ -218,7 +221,7 @@ def render_scenario(path, configured=False, *, scenario_id="comparison", title=N
         if scenario_id == "flap":
             rows.append(comparison_row(
                 "Max observed recovery", before.get("max_recovery_ms"), after.get("max_recovery_ms"),
-                "{:,} ms", "{:+,} ms", ("Faster", "Slower"),
+                "{:,} ms", "{:+,} ms", ("faster", "slower"),
             ))
     state = f"<p>{page['state']}</p>" if title and page["state"] != "Measured comparison" else ""
     if page["help"]:
