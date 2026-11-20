@@ -74,6 +74,74 @@ resilient-agent-client/
   flapper's FD count out of process and opens no sockets itself, so the
   measurement cannot leak FDs into the runner.
 
+## Before / after proxy latency dashboard
+
+From the repo root, run `python3 dashboard/serve.py` and open
+<http://127.0.0.1:8765/> for the bundled **steady** and **flapping** local
+loopback runs, or open [the standalone HTML snapshot](dashboard/proxy-latency-offline.html)
+in a browser (download the file first if GitHub displays the source).
+These are not production or BaoLianDeng traces. The baseline is
+`b966dbb` and the [integrated candidate](https://github.com/lilaclilac09/resilient-agent-client/tree/devin/1795160000-candidate-4-5-6)
+is `86d382a`; there is no demonstrated speedup.
+
+Each page load rereads the exports. Use `--results /path/to/results.json`
+to show a single custom export. Missing bundled inputs are **Pending
+measurement**; a missing explicitly configured file is **Results file
+missing**. The startup log prints input paths for the operator; the page
+shows only safe input labels. The dashboard does not run a benchmark.
+For an organization-only preview routed by a private proxy, set
+`HOST=0.0.0.0 PORT=8765 python3 dashboard/serve.py`.
+`RESULTS_PATH` sets the export location; `--host`, `--port` and
+`--results` override their corresponding environment variables.
+The dashboard itself does not provide authentication or TLS; do not
+expose it directly to the public internet.
+
+The measured export is a JSON object with these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `scenario` | String describing the shared workload, request timing boundaries, and proxy conditions. |
+| `source.environment` | String describing where the run took place (e.g. loopback fixture vs. real proxy app). |
+| `source.measured_at` | String containing the measurement timestamp, preferably ISO 8601. |
+| `source.command` | String containing the command used to produce the data. Use a reproducible command without secrets. |
+| `source.scope` | `both` (default), `before`, or `after`: which run or runs the source describes. |
+| `before`, `after` | Objects with `label` (string identifying the baseline or candidate client revision) and the following fields. |
+| `before.samples`, `after.samples` | Non-negative integer counts of successful requests used to compute the percentiles. |
+| `before.failures`, `after.failures` | Non-negative integer counts of failed requests. Each revision must have at least one success or failure. |
+| `p50_ms`, `p95_ms`, `p99_ms` in each revision | Required success-latency percentiles in milliseconds, as finite non-negative numbers in ascending order. Set all three to `null` when the run had no successes. |
+| `errors` in each revision (optional) | Object mapping error categories to positive integer counts that sum to `failures`. Omit if the breakdown was not recorded. |
+| `max_recovery_ms` (recorded flap export) | Non-negative integer maximum observed time in milliseconds from proxy restart to the start of a later successful request. |
+
+Report the same metric and workload for both revisions; the labels
+identify what actually changed rather than assuming the candidate is faster.
+The failure rate is `failures / (samples + failures)`; its signed change
+is in percentage points. If documented error breakdowns differ, the dashboard
+compares the union of categories and leaves unreported counts blank.
+Refreshing an unchanged measured export in the same browser tab shows
+when it was last checked.
+
+The attached [steady](dashboard/data/proxy-latency-steady.json) and
+[flap](dashboard/data/proxy-latency-flap.json) exports are stored unchanged.
+For these exports, an integer `errors` is used as `failures`; it is not
+a category breakdown. The [benchmark source](dashboard/data/bench-main.rs)
+counted all errors together, including client-side rejections, so separate
+fail-fast counts are unavailable. Percentiles are medians of five per-trial
+percentiles; successful and failed requests are summed across trials.
+Each export lists the recorded invocation; see the benchmark source and
+[recorded trial summaries](dashboard/data/raw-samples.jsonl). For Mac
+configuration, see the [BaoLianDeng setup guide (PR #4)](https://github.com/lilaclilac09/resilient-agent-client/pull/4).
+
+To regenerate the two exports from the recorded trials using the
+[export helper](dashboard/data/make_export.py), supply an existing output
+directory, for example:
+
+```sh
+python3 dashboard/data/make_export.py dashboard/data/raw-samples.jsonl dashboard/data b966dbb 86d382a --measured-at 2026-11-20T07:09:32+00:00
+python3 dashboard/serve.py --snapshot dashboard/proxy-latency-offline.html
+```
+
+Run the dashboard HTTP smoke checks with `python3 -B -m unittest discover -s dashboard`.
+
 ## Status
 
 ### Fetch response framing check

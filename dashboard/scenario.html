@@ -1,0 +1,24 @@
+<section class="panel" id="$id" aria-labelledby="$id-title">
+  <h2 id="$id-title">$title</h2>$state_notice
+  <p>$message</p>
+  <p class="note">Expected input: <code>$input_label</code>.$help</p>
+  <p class="series-key" aria-hidden="true">
+    <span><strong>Before:</strong> $before_label</span>
+    <span><strong>After:</strong> $after_label</span>
+  </p>
+  <div class="comparison" tabindex="0" role="region" aria-label="Before and after latency">
+    <table role="table" aria-label="Proxy request latency comparison">
+      <thead role="rowgroup">
+        <tr role="row">
+          <th scope="col" role="columnheader">Metric</th>
+          <th scope="col" role="columnheader">Before <small>$before_label</small></th>
+          <th scope="col" role="columnheader">After <small>$after_label</small></th>
+          <th scope="col" role="columnheader">Change</th>
+        </tr>
+      </thead>
+      <tbody role="rowgroup">$rows</tbody>
+    </table>
+  </div>
+  <p class="note">Latency is for successful requests only. Failure rate is failed requests divided by all attempted requests. Observed change is After minus Before; failure-rate change is shown in percentage points (pp). A dash means no value was reported or could be calculated.</p>
+  $source
+</section>
