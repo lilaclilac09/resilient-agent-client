@@ -232,6 +232,91 @@ impl Drop for Mihomo {
     }
 }
 
+#[derive(Default)]
+struct McpPhase {
+    ran: bool,
+    calls: usize,
+    ok: usize,
+    errors: usize,
+    wrong_name_rejected: bool,
+}
+
+fn run_mcp_phase(
+    bin: &str,
+    mixed: u16,
+    ca_file: &std::path::Path,
+    up: u16,
+    agents: usize,
+) -> McpPhase {
+    use serde_json::{json, Value};
+    let mut child = Command::new(bin)
+        .env("AGENT_FETCH_PROXY", format!("http://127.0.0.1:{mixed}"))
+        .env("AGENT_FETCH_CA_FILE", ca_file)
+        .env(
+            "AGENT_FETCH_ALLOW",
+            format!("https://localhost:{up},https://127.0.0.1:{up}"),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start agent-fetch-mcp");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut send = |v: Value| {
+        writeln!(stdin, "{v}").unwrap();
+        stdin.flush().unwrap();
+    };
+    let mut recv = || {
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        serde_json::from_str::<Value>(&line).unwrap()
+    };
+    send(
+        json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mihomo-e2e","version":"0"}}}),
+    );
+    let _ = recv();
+    send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    let calls = agents * 10;
+    for i in 0..calls {
+        send(
+            json!({"jsonrpc":"2.0","id":i + 1,"method":"tools/call","params":{"name":"resilient_fetch","arguments":{"url":format!("https://localhost:{up}/mcp/{i}")}}}),
+        );
+    }
+    let (mut ok, mut errors) = (0, 0);
+    for _ in 0..calls {
+        let r = recv();
+        let i = r["id"].as_u64().unwrap_or(0) as usize - 1;
+        let text = r["result"]["content"][0]["text"].as_str().unwrap_or("");
+        if r["result"]["isError"] == false && text.ends_with(&format!("secure /mcp/{i}")) {
+            ok += 1;
+        } else {
+            if errors == 0 {
+                eprintln!("first mcp error: {text}");
+            }
+            errors += 1;
+        }
+    }
+    send(
+        json!({"jsonrpc":"2.0","id":99999,"method":"tools/call","params":{"name":"resilient_fetch","arguments":{"url":format!("https://127.0.0.1:{up}/neg")}}}),
+    );
+    let r = recv();
+    let wrong_name_rejected = r["result"]["isError"] == true
+        && r["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("TLS");
+    let _ = child.kill();
+    let _ = child.wait();
+    McpPhase {
+        ran: true,
+        calls,
+        ok,
+        errors,
+        wrong_name_rejected,
+    }
+}
+
 fn spawn_independent(
     http: u16,
     up: u16,
@@ -548,6 +633,17 @@ fn main() {
     );
     drop(api);
 
+    // Phase 1c: the `agent-fetch-mcp` stdio server, configured the way a
+    // `.cursor/mcp.json` entry would start it, driven over stdio.
+    let mcp = match std::env::var("MCP_SERVER") {
+        Ok(bin) => run_mcp_phase(&bin, mihomo.mixed, &ca_file, up, agents),
+        Err(_) => McpPhase::default(),
+    };
+    println!(
+        "{{\"phase\":\"mcp\",\"ran\":{},\"calls\":{},\"ok\":{},\"errors\":{},\"wrong_name_rejected\":{}}}",
+        mcp.ran, mcp.calls, mcp.ok, mcp.errors, mcp.wrong_name_rejected
+    );
+
     // Phase 2: one real mihomo restart under load.
     let (mut restart_ok, mut restart_err, mut recovery_ms) = (0, 0, 0u128);
     if restart {
@@ -599,6 +695,9 @@ fn main() {
         stats.open_now,
     );
     let mut fail = Vec::new();
+    if mcp.ran && (mcp.ok != mcp.calls || mcp.errors > 0 || !mcp.wrong_name_rejected) {
+        fail.push("agent-fetch-mcp phase failed");
+    }
     if api_ok.load(Ordering::SeqCst) == 0 || api_err.load(Ordering::SeqCst) > 0 {
         fail.push("public API HTTPS through mihomo had errors");
     }

@@ -6,6 +6,7 @@ members = [
     "crates/retry-budget",
     "crates/telemetry-isolation",
     "crates/agent-client",
+    "crates/agent-fetch-mcp",
     "harness/proxy-flapper",
     "harness/fault-server",
     "harness/loopback-fixtures",
