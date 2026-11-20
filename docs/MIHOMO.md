@@ -92,3 +92,24 @@ With `ProxyMode::FromEnv` loopback hosts always go direct, so use
 Not verified here: integration into any real agent app or IDE (Cursor or
 others; nothing is wired to `agent-client` outside this repo), SOCKS5 traffic, mihomo rule sets other than `DIRECT`, and
 real internet origins. Those need the owner's own machine and config.
+
+## Intermittent raw-pool steady-phase error (quantified, not root-caused)
+
+In 14 back-to-back runs (`run-mihomo-e2e.sh 8 15 1`, mihomo v1.19.34):
+
+| Path | Requests | Errors |
+|---|---|---|
+| Raw-pool steady phase (no retries, by design) | ~27,500 | 2, in 2 runs (1 each) |
+| Public `Client` / `send_https` phase | ~28,300 | 0 |
+
+Both raw-pool errors were `UnexpectedEof` on a **fresh** tunnel
+(`reused=false`), before the first response arrived. The tunnel was
+closed without a TLS alert. That is consistent with mihomo closing a newly
+opened CONNECT tunnel, but the logs don't prove which side closed it. The
+upstream fixture has no connection limit. The public client retries a GET
+on its own retry budget, so the agents never saw the error. The raw-pool
+phase reports it because it has no retry path.
+
+The harness now logs each raw-pool error on stderr (`raw-pool error
+agent=… at=checkout|request reused=…`), so a recurrence can be
+attributed.

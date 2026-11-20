@@ -470,8 +470,9 @@ fn main() {
                     while Instant::now() < until {
                         let mut c = match pool.checkout(&origin, Priority::Interactive) {
                             Ok(c) => c,
-                            Err(_) => {
+                            Err(e) => {
                                 err.fetch_add(1, Ordering::Relaxed);
+                                eprintln!("raw-pool error agent={i} at=checkout: {e:?}");
                                 std::thread::sleep(Duration::from_millis(200));
                                 continue;
                             }
@@ -483,13 +484,17 @@ fn main() {
                         .unwrap();
                         let mut s = rustls::Stream::new(&mut tls, c.stream());
                         handshakes.fetch_add(1, Ordering::Relaxed);
-                        for _ in 0..5 {
+                        for n in 0..5 {
                             match https_get(&mut s, &format!("/agent/{i}")) {
                                 Ok(b) if b == format!("secure /agent/{i}") => {
                                     ok.fetch_add(1, Ordering::Relaxed)
                                 }
-                                _ => {
+                                r => {
                                     err.fetch_add(1, Ordering::Relaxed);
+                                    eprintln!(
+                                        "raw-pool error agent={i} at=request reused={}: {r:?}",
+                                        n > 0
+                                    );
                                     break;
                                 }
                             };
