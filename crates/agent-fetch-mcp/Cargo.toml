@@ -1,0 +1,12 @@
+[package]
+name = "agent-fetch-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "stdio MCP server exposing a read-only `resilient_fetch` tool backed by agent-client"
+
+[dependencies]
+agent-client = { path = "../agent-client" }
+serde_json = "1"
+
+[dev-dependencies]
+loopback-fixtures = { path = "../../harness/loopback-fixtures" }

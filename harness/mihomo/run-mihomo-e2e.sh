@@ -8,4 +8,6 @@ BIN="${MIHOMO_BIN:-$(command -v mihomo || true)}"
 cargo build -q --release -p mihomo-e2e
 cargo build -q --release -p agent-client --example fetch
 export FETCH_EXAMPLE="$PWD/target/release/examples/fetch"
+cargo build -q --release -p agent-fetch-mcp
+export MCP_SERVER="$PWD/target/release/agent-fetch-mcp"
 exec timeout 180 ./target/release/mihomo-e2e "$BIN" "${1:-8}" "${2:-15}" "${3:-1}"

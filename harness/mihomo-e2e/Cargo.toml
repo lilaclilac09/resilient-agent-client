@@ -7,5 +7,6 @@ description = "Bounded loopback test: agents make certificate-validated HTTPS re
 [dependencies]
 agent-client = { path = "../../crates/agent-client" }
 connection-pool = { path = "../../crates/connection-pool" }
+serde_json = "1"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

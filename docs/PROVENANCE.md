@@ -46,3 +46,8 @@ implementation rests on it.
 | 14 | [rcgen 0.13](https://docs.rs/rcgen/0.13) | Library (dev/harness only) | 4 | Medium: sandbox CA and `localhost` leaf in `mihomo-e2e` | Test PKI generated per run, never installed |
 | 15 | [mihomo v1.19.34 release binary](https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.34) | Tool (real proxy under test) | 4 | High: the real-proxy end-to-end run | `mixed-port` / `port` CONNECT behaviour; sha256 checked against the GitHub release asset digest |
 | 16 | [RFC 9110 §15.2, §6.3](https://www.rfc-editor.org/rfc/rfc9110#section-15.2) | IETF standard | 5 | Low: response framing | Skip interim 1xx; no body for HEAD/204/304 |
+| 17 | [Cursor docs — Network configuration](https://cursor.com/docs/enterprise/network-configuration) | Vendor docs | 4 | Medium: `docs/CURSOR.md` scope | Which Cursor hosts and protocols (HTTP/2, SSE fallback) exist; no documented hook for replacing Cursor's network stack |
+| 18 | [Cursor docs — MCP](https://cursor.com/docs/context/mcp) | Vendor docs | 5 | High: integration path | `mcp.json` stdio fields (`type`, `command`, `args`, `env`), global vs project config |
+| 19 | [Cursor docs — Network troubleshooting](https://cursor.com/docs/troubleshooting/common-issues) | Vendor docs | 4 | Low: user-side settings | HTTP Compatibility Mode, Run Diagnostics |
+| 20 | [MCP specification 2025-06-18](https://modelcontextprotocol.io/specification/2025-06-18) | Protocol spec | 5 | High: `agent-fetch-mcp` | stdio framing (newline-delimited, stderr for logs), lifecycle, version negotiation, `tools/list`/`tools/call` result shape |
+| 21 | [serde_json 1.x](https://docs.rs/serde_json) | Library | 5 | Medium: JSON-RPC parsing in `agent-fetch-mcp` | Parsing and serialising MCP messages |

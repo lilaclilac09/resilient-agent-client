@@ -151,7 +151,8 @@ resilient-agent-client/
 │   ├── circuit-breaker/      # Closed / Open / Half-Open state machine + per-origin Registry, probe timeout
 │   ├── retry-budget/         # decorrelated jitter + rolling per-origin retry budget, coalesced
 │   ├── telemetry-isolation/  # interactive vs background workers, gated queue, batched telemetry
-│   └── agent-client/         # facade composing the four; one Client shared by all agents
+│   ├── agent-client/         # facade composing the four; one Client shared by all agents
+│   └── agent-fetch-mcp/      # stdio MCP server: read-only resilient_fetch tool for IDE agents
 ├── harness/
 │   ├── proxy-flapper/        # loopback flapping simulation (trip harness)
 │   ├── fault-server/         # loopback server killed/restarted on a timer
@@ -164,7 +165,8 @@ resilient-agent-client/
 │   ├── SPEC.md
 │   ├── PROVENANCE.md         # rule → source → code → test, reference ratings
 │   ├── MIHOMO.md             # multi-agent use behind mihomo / clash
-│   └── RSI-REINFORCEMENT.md  # bounded measure → change → re-measure loop
+│   ├── RSI-REINFORCEMENT.md  # bounded measure → change → re-measure loop
+│   └── CURSOR.md             # supported IDE integration and what it does / doesn't protect
 └── README.md
 ```
 

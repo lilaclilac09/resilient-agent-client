@@ -79,7 +79,7 @@ resilient-agent-client/
 All four modules are implemented and composed in `crates/agent-client`
 (one `Client` shared by every agent in a process, optionally through a
 local HTTP proxy such as mihomo via `HTTPS_PROXY`). `cargo test
---workspace`: 59 tests, loopback fixtures only.
+--workspace`: 63 tests, loopback fixtures only.
 
 Measured 2026-11-19:
 
@@ -99,9 +99,13 @@ Measured 2026-11-19:
   independent client on the HTTP port stayed connected; `examples/fetch.rs`
   worked as a separate process; untrusted CA and wrong name rejected.
 
+- `agent-fetch-mcp` (stdio MCP server for Cursor and other IDEs) through
+  the same real mihomo: 80/80 concurrent verified HTTPS tool calls OK.
+
 Docs: [SPEC](docs/SPEC.md) · [provenance and references](docs/PROVENANCE.md)
 · [multi-agent behind mihomo](docs/MIHOMO.md)
 · [RSI / reinforcement](docs/RSI-REINFORCEMENT.md)
+· [Cursor / MCP integration](docs/CURSOR.md)
 
 ## Future research directions
 
