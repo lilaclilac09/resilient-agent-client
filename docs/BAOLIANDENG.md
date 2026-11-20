@@ -1,35 +1,37 @@
 # Running agents behind BaoLianDeng (macOS)
 
-[BaoLianDeng](https://github.com/madeye/BaoLianDeng) is a macOS
-transparent proxy (`NETransparentProxyProvider` + the meow-rs
-Clash/mihomo-compatible engine) with per-app proxy/bypass lists. Its
-README does not document a local HTTP/mixed port, so this guide does not
-assume one exists.
+[BaoLianDeng](https://github.com/madeye/BaoLianDeng) is a macOS proxy app
+built on the meow-rs Clash/mihomo-compatible engine. Version 6.x has a
+**Local Proxy** mode: a mixed HTTP/SOCKS5 listener on loopback, shown as
+the active **Proxy Address** in Settings, that needs no system proxy.
+Port changes take effect after a restart
+([SettingsView.swift](https://github.com/madeye/BaoLianDeng/blob/10cffd10b15d485f2377607d055b01700b04c58b/BaoLianDeng/Views/SettingsView.swift#L112-L147)).
+That is source evidence, not a tested run.
 
 Not tested here: nothing in this repository has run against BaoLianDeng
-or meow-rs. The loopback and mihomo results in README/MIHOMO.md do not
-prove anything about it.
+or meow-rs. The loopback and mihomo results don't prove anything about it.
 
-## Setup (operator settings only)
+## Setup: Local Proxy mode (the primary route)
 
-1. **Direct mode.** Leave `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` unset for
-   `agent-client` and `agent-fetch-mcp`. With no proxy variables, the
-   client dials directly, and BaoLianDeng intercepts the sockets at the OS
-   level. If one of the variables is set to something unsupported, such
-   as `socks5://`, `Client::new` refuses to start rather than silently
-   bypass it.
-2. **Per-app list.** In BaoLianDeng, make sure these go through the proxy:
-   Cursor (for Cursor's own traffic) and the `agent-fetch-mcp` binary (for
-   tool calls). That's the owner's setting; nothing here changes it.
-3. **Allowlist and TLS are unchanged.** `AGENT_FETCH_ALLOW` still lists
-   the exact HTTPS origins, and certificates are always verified. If
-   BaoLianDeng's rules route an origin through a TLS-inspecting node,
-   calls fail with `ClientError::Tls`. They don't silently trust it.
+1. In BaoLianDeng 6.x, enable Local Proxy and note the **Proxy Address**
+   port. If you change the port, restart the app.
+2. Point the agents at it, for example in the `agent-fetch-mcp` entry of
+   `mcp.json`:
+   `"HTTPS_PROXY": "http://127.0.0.1:<Proxy Address port>"`. The mixed
+   listener accepts HTTP CONNECT, which is what the client speaks.
+   Don't use a `socks5://` URL: `Client::new` refuses it rather than
+   silently bypassing the proxy.
+3. If the proxy is down, don't switch to direct mode as a workaround.
+   Calls are meant to fail fast until the Local Proxy is back.
+4. The allowlist and TLS settings stay as they are. `AGENT_FETCH_ALLOW`
+   still lists the exact HTTPS origins, and certificates are always
+   verified. A route through a TLS-inspecting node fails with
+   `ClientError::Tls` rather than being trusted.
 
 ## What the client does when the extension flaps
 
-A restart or a node switch shows up as resets or refused connections on
-direct sockets. The client:
+A Local Proxy restart shows up as refused CONNECTs; a node failure shows up
+as proxy 502/503/504. The client:
 
 - counts them toward the per-origin breaker, which opens after 5;
 - fails calls fast while the breaker is Open (`circuit open …`), with no
@@ -41,14 +43,14 @@ direct sockets. The client:
 
 ## Reading a log (diagnosis, not evidence)
 
-| Line on `agent-fetch-mcp` stderr / tool result | Likely cause | What to check |
+| Line on `agent-fetch-mcp` stderr / tool result | Consistent with (not a diagnosis) | What to check |
 |---|---|---|
 | `breaker origin=… Closed->Open reason="failure threshold reached"` | 5 transport failures in a row to that origin | BaoLianDeng connected? Node reachable? The Logs tab at the same time |
 | `retry-budget-exhausted origin=…` | Repeated failures within 60 s | Same as above; the client is protecting the system as designed |
 | `circuit open for …; failing fast` | Breaker Open, no request sent | Wait for the half-open probe, or fix the upstream path |
 | `TLS error: invalid peer certificate` | Chain or name mismatch (often a TLS-inspecting route) | The rule/node used for that origin |
 | `… is not in the operator allowlist` | Origin missing from `AGENT_FETCH_ALLOW` | The operator's `mcp.json` |
-| `proxy variable set but unsupported` | A SOCKS or credentialed proxy URL in the environment | Remove it (direct mode) |
+| `proxy variable set but unsupported` | A SOCKS or credentialed proxy URL in the environment | Use the `http://127.0.0.1:<port>` Proxy Address |
 | No client lines, and Cursor itself is disconnected | Cursor's own traffic, which this library doesn't cover | Cursor Settings → Network → Run Diagnostics; HTTP Compatibility Mode; BaoLianDeng's per-app list |
 
 To diagnose a real incident, collect BaoLianDeng's Logs tab export and the
