@@ -100,6 +100,7 @@ The measured export is a JSON object with these fields:
 | `source.environment` | String describing where the run took place (e.g. loopback fixture vs. real proxy app). |
 | `source.measured_at` | String containing the measurement timestamp, preferably ISO 8601. |
 | `source.command` | String containing the command used to produce the data. Use a reproducible command without secrets. |
+| `source.scope` | `both` (default), `before`, or `after`: which run or runs the source describes. |
 | `before`, `after` | Objects with `label` (string identifying the baseline or candidate configuration) and the following fields. |
 | `before.samples`, `after.samples` | Non-negative integer counts of successful requests used to compute the percentiles. |
 | `before.failures`, `after.failures` | Non-negative integer counts of failed requests. Each configuration must have at least one success or failure. |
@@ -111,6 +112,9 @@ identify what actually changed rather than assuming the candidate is faster.
 The failure rate is `failures / (samples + failures)`; its signed change
 is in percentage points. If documented error breakdowns differ, the dashboard
 compares the union of categories and leaves unreported counts blank.
+Refreshing an unchanged measured export in the same browser tab shows
+when it was last checked. See the [BaoLianDeng macOS setup guide](https://github.com/lilaclilac09/resilient-agent-client/blob/77db3324219f3be93a764bba820360f5551b59b3/docs/BAOLIANDENG.md)
+for setup; the benchmark command appears with its measured export.
 Run the dashboard HTTP smoke checks with `python3 -B -m unittest discover -s dashboard`.
 
 ## Status

@@ -5,6 +5,7 @@ import json
 import math
 import os
 from functools import partial
+from hashlib import sha256
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,12 +19,20 @@ DEFAULT_INPUT_LABEL = "target/proxy-latency.json"
 CONFIGURED_INPUT_LABEL = "Configured export (RESULTS_PATH or --results)"
 DEFAULT_RESULTS = DIRECTORY.parent / DEFAULT_INPUT_LABEL
 FORMAT_HELP = "Follow the Before / after proxy latency dashboard format in README.md, then refresh."
+SOURCE_SCOPES = {
+    "both": "Both runs (Before and After)",
+    "before": "Before run only",
+    "after": "After run only",
+}
 PERCENTILES = (
     ("Median (p50)", "p50_ms"),
     ("95th percentile (p95)", "p95_ms"),
     ("99th percentile (p99)", "p99_ms"),
 )
-COUNTS = (("Successful requests", "samples"), ("Failed requests", "failures"))
+COUNTS = (
+    ("Successful requests", "samples", ("Fewer successes", "More successes")),
+    ("Failed requests", "failures", ("Fewer failures", "More failures")),
+)
 
 
 class ResultsValidationError(ValueError):
@@ -53,6 +62,9 @@ def read_results(path):
     source = object_field(data, "source")
     for field in ("environment", "measured_at", "command"):
         text_field(source, field, "source.")
+    scope = source.get("scope", "both")
+    if not isinstance(scope, str) or scope not in SOURCE_SCOPES:
+        raise ResultsValidationError("Set source.scope to both, before, or after.")
     for name in ("before", "after"):
         series = object_field(data, name)
         text_field(series, "label", f"{name}.")
@@ -90,32 +102,40 @@ def read_results(path):
 
 
 def metric_row(title, before, after, change="—"):
-    return f"<tr><th scope='row'>{escape(title)}</th><td>{before}</td><td>{after}</td><td>{change}</td></tr>"
+    return (
+        f"<tr role='row'><th scope='row' role='rowheader'>{escape(title)}</th>"
+        f"<td role='cell'>{before}</td><td role='cell'>{after}</td><td role='cell'>{change}</td></tr>"
+    )
 
 
-def comparison_row(title, before, after, value_format, delta_format):
-    delta = after - before if before is not None and after is not None else None
+def comparison_row(title, before, after, value_format, delta_format, directions):
+    if before is None or after is None:
+        change = "Not comparable"
+    else:
+        delta = after - before
+        direction = directions[0] if delta < 0 else directions[1] if delta > 0 else "No change"
+        change = f"{direction} ({delta_format.format(delta)})" if delta else direction
     return metric_row(
         title,
         value_format.format(before) if before is not None else "—",
         value_format.format(after) if after is not None else "—",
-        delta_format.format(delta) if delta is not None else "—",
+        change,
     )
 
 
 def measured_rows(before, after):
     rows = [
-        comparison_row(title, before[field], after[field], "{:.3f} ms", "{:+.3f} ms")
+        comparison_row(title, before[field], after[field], "{:.3f} ms", "{:+.3f} ms", ("Faster", "Slower"))
         for title, field in PERCENTILES
     ]
-    for title, field in COUNTS:
-        rows.append(comparison_row(title, before[field], after[field], "{:,}", "{:+,}"))
+    for title, field, directions in COUNTS:
+        rows.append(comparison_row(title, before[field], after[field], "{:,}", "{:+,}", directions))
     rates = [100 * (s["failures"] / (s["samples"] + s["failures"])) for s in (before, after)]
-    rows.append(comparison_row("Failure rate", *rates, "{:.2f}%", "{:+.2f} pp"))
+    rows.append(comparison_row("Failure rate", *rates, "{:.2f}%", "{:+.2f} pp", ("Lower failure rate", "Higher failure rate")))
     errors = [s.get("errors", {} if not s["failures"] else None) for s in (before, after)]
     for category in sorted(set(errors[0] or {}) | set(errors[1] or {})):
         counts = [e.get(category, 0) if e is not None else None for e in errors]
-        rows.append(comparison_row(f"Failed requests: {category}", *counts, "{:,}", "{:+,}"))
+        rows.append(comparison_row(f"Failed requests: {category}", *counts, "{:,}", "{:+,}", ("Fewer failures", "More failures")))
     return rows
 
 
@@ -129,7 +149,7 @@ def read_error_message(error):
 
 
 def render(path, configured=False):
-    rows = [metric_row(title, "—", "—") for title, _ in PERCENTILES + COUNTS]
+    rows = [metric_row(title, "—", "—") for title, *_ in PERCENTILES + COUNTS]
     rows.append(metric_row("Failure rate", "—", "—"))
     page = {
         "state": "Pending measurement",
@@ -139,6 +159,7 @@ def render(path, configured=False):
         "source": "",
         "input_label": CONFIGURED_INPUT_LABEL if configured else DEFAULT_INPUT_LABEL,
         "help": "",
+        "revision": "",
     }
     try:
         data = read_results(path)
@@ -167,14 +188,17 @@ def render(path, configured=False):
         before, after = data["before"], data["after"]
         rows = measured_rows(before, after)
         source = {name: escape(data["source"][name]) for name in ("environment", "measured_at", "command")}
+        scope = SOURCE_SCOPES[data["source"].get("scope", "both")]
         page.update(
             state="Measured comparison",
             message=escape(data["scenario"]),
             before_label=escape(before["label"]),
             after_label=escape(after["label"]),
+            revision=sha256(json.dumps(data, sort_keys=True).encode("utf-8")).hexdigest(),
             source=(
                 "<section class='source' aria-labelledby='source-title'>"
                 "<h2 id='source-title'>Measurement source</h2><dl>"
+                f"<dt>Applies to</dt><dd>{scope}</dd>"
                 f"<dt>Environment</dt><dd>{source['environment']}</dd>"
                 f"<dt>Measured at</dt><dd>{source['measured_at']}</dd>"
                 f"<dt>Command</dt><dd><code>{source['command']}</code></dd>"
