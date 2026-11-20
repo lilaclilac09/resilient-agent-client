@@ -652,6 +652,66 @@ fn exchange(
     }
 }
 
+fn invalid_body(message: &'static str) -> Fail {
+    Fail::Protocol(io::Error::new(io::ErrorKind::InvalidData, message))
+}
+
+fn read_chunk_line(r: &mut impl BufRead) -> Result<String, Fail> {
+    let mut line = String::new();
+    read_head_line(r, &mut line).map_err(|e| classify(e, true))?;
+    if !line.ends_with('\n') {
+        return Err(classify(
+            io::Error::new(io::ErrorKind::UnexpectedEof, "closed in chunk metadata"),
+            true,
+        ));
+    }
+    Ok(line)
+}
+
+fn read_chunked(r: &mut impl BufRead, max_body: usize) -> Result<Vec<u8>, Fail> {
+    let mut body = Vec::new();
+    loop {
+        let line = read_chunk_line(r)?;
+        let line = line
+            .strip_suffix("\r\n")
+            .ok_or_else(|| invalid_body("invalid chunk size line"))?;
+        let size = line
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches([' ', '\t']);
+        if size.is_empty() || !size.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(invalid_body("invalid chunk size"));
+        }
+        let size =
+            usize::from_str_radix(size, 16).map_err(|_| invalid_body("invalid chunk size"))?;
+        if size == 0 {
+            for _ in 0..=MAX_HEADERS {
+                let trailer = read_chunk_line(r)?;
+                if trailer == "\r\n" {
+                    return Ok(body);
+                }
+                if !trailer.ends_with("\r\n") || !trailer.contains(':') {
+                    return Err(invalid_body("invalid chunk trailer"));
+                }
+            }
+            return Err(invalid_body("too many trailers"));
+        }
+        if size > max_body - body.len() {
+            return Err(invalid_body("response body too large"));
+        }
+        let start = body.len();
+        body.resize(start + size, 0);
+        r.read_exact(&mut body[start..])
+            .map_err(|e| classify(e, true))?;
+        let mut end = [0; 2];
+        r.read_exact(&mut end).map_err(|e| classify(e, true))?;
+        if end != *b"\r\n" {
+            return Err(invalid_body("invalid chunk terminator"));
+        }
+    }
+}
+
 fn http_exchange<S: Read + Write>(
     s: &mut S,
     origin: &Origin,
@@ -733,6 +793,7 @@ fn http_exchange<S: Read + Write>(
     // RFC 9110 §6.3: no body for HEAD, 204, 304.
     let no_body = req.method == "HEAD" || status == 204 || status == 304;
     let mut len: Option<usize> = None;
+    let mut chunked = false;
     let mut keep_alive = true;
     for _ in 0..MAX_HEADERS {
         let mut h = String::new();
@@ -753,20 +814,27 @@ fn http_exchange<S: Read + Write>(
                     keep_alive,
                 ));
             }
-            let len = len.ok_or_else(|| {
-                Fail::Protocol(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "missing Content-Length",
-                ))
-            })?;
-            if len > max_body {
-                return Err(Fail::Protocol(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "response body too large",
-                )));
-            }
-            let mut body = vec![0u8; len];
-            r.read_exact(&mut body).map_err(|e| classify(e, true))?;
+            let body = if chunked {
+                read_chunked(&mut r, max_body)?
+            } else if let Some(len) = len {
+                if len > max_body {
+                    return Err(invalid_body("response body too large"));
+                }
+                let mut body = vec![0u8; len];
+                r.read_exact(&mut body).map_err(|e| classify(e, true))?;
+                body
+            } else {
+                keep_alive = false;
+                let mut body = Vec::new();
+                r.by_ref()
+                    .take((max_body as u64).saturating_add(1))
+                    .read_to_end(&mut body)
+                    .map_err(|e| classify(e, true))?;
+                if body.len() > max_body {
+                    return Err(invalid_body("response body too large"));
+                }
+                body
+            };
             return Ok((
                 Response {
                     status,
@@ -778,7 +846,19 @@ fn http_exchange<S: Read + Write>(
         }
         let lower = h.to_ascii_lowercase();
         if let Some(v) = lower.strip_prefix("content-length:") {
-            len = v.trim().parse().ok();
+            let value = v
+                .trim()
+                .parse()
+                .map_err(|_| invalid_body("invalid Content-Length"))?;
+            if len.is_some_and(|n| n != value) {
+                return Err(invalid_body("conflicting Content-Length"));
+            }
+            len = Some(value);
+        } else if let Some(v) = lower.strip_prefix("transfer-encoding:") {
+            if chunked || v.trim() != "chunked" {
+                return Err(invalid_body("unsupported Transfer-Encoding"));
+            }
+            chunked = true;
         } else if lower.starts_with("connection:") && lower.contains("close") {
             keep_alive = false;
         }
