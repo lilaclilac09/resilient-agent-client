@@ -106,6 +106,7 @@ Docs: [SPEC](docs/SPEC.md) · [provenance and references](docs/PROVENANCE.md)
 · [multi-agent behind mihomo](docs/MIHOMO.md)
 · [RSI / reinforcement](docs/RSI-REINFORCEMENT.md)
 · [Cursor / MCP integration](docs/CURSOR.md)
+· [BaoLianDeng (macOS)](docs/BAOLIANDENG.md)
 
 ## Future research directions
 
