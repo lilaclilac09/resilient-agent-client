@@ -16,6 +16,10 @@ struct TlsUpstream {
 }
 
 fn tls_upstream() -> TlsUpstream {
+    tls_upstream_with_framing(false)
+}
+
+fn tls_upstream_with_framing(chunked: bool) -> TlsUpstream {
     use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
@@ -72,13 +76,25 @@ fn tls_upstream() -> TlsUpstream {
                         let method = parts.next();
                         let path = parts.next().unwrap_or("/");
                         let body = format!("secure {path}");
-                        let _ = write!(
-                            tls,
-                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
-                            body.len()
-                        );
-                        if method != Some("HEAD") {
-                            let _ = tls.write_all(body.as_bytes());
+                        if chunked {
+                            let _ = tls.write_all(
+                                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+                            );
+                            for chunk in body.as_bytes().chunks(3) {
+                                let _ = write!(tls, "{:x};fixture=yes\r\n", chunk.len());
+                                let _ = tls.write_all(chunk);
+                                let _ = tls.write_all(b"\r\n");
+                            }
+                            let _ = tls.write_all(b"0\r\nX-Fixture: complete\r\n\r\n");
+                        } else {
+                            let _ = write!(
+                                tls,
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                                body.len()
+                            );
+                            if method != Some("HEAD") {
+                                let _ = tls.write_all(body.as_bytes());
+                            }
                         }
                         let _ = tls.flush();
                     }
@@ -191,6 +207,38 @@ fn lifecycle_and_tool_listing_follow_the_spec() {
     );
     m.send(json!({"jsonrpc":"2.0","id":3,"method":"nope"}));
     assert_eq!(m.recv()["error"]["code"], -32601);
+}
+
+#[test]
+fn chunked_https_fetch_over_proxy_stdio() {
+    let up = tls_upstream_with_framing(true);
+    let proxy = ConnectProxy::start(0).unwrap();
+    let mut m = Mcp::start(&[
+        (
+            "AGENT_FETCH_PROXY",
+            format!("http://127.0.0.1:{}", proxy.port),
+        ),
+        ("AGENT_FETCH_CA_FILE", up.ca_file.display().to_string()),
+        (
+            "AGENT_FETCH_ALLOW",
+            format!("https://localhost:{}", up.port),
+        ),
+    ]);
+    assert_eq!(m.init()["result"]["protocolVersion"], "2025-06-18");
+    m.send(call(
+        2,
+        json!({"url": format!("https://localhost:{}/chunked-response", up.port)}),
+    ));
+    let response = m.recv();
+    assert_eq!(response["id"], 2);
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert_eq!(
+        response["result"]["content"][0]["text"],
+        "HTTP 200 (1 attempt(s))\n\nsecure /chunked-response"
+    );
+    assert_eq!(proxy.total_tunnels(), 1, "fetch did not use CONNECT");
+    assert_eq!(up.accepted.load(Ordering::SeqCst), 1);
+    std::fs::remove_file(&up.ca_file).unwrap();
 }
 
 #[test]

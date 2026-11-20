@@ -76,6 +76,20 @@ resilient-agent-client/
 
 ## Status
 
+### Fetch response framing check
+
+Run `bash harness/check-fetch-framing.sh` (Rust/Cargo required). This uses only
+local loopback servers, including a CONNECT proxy, and prints `PASS: <case>`
+for each of nine cases: chunked bodies with extensions/trailers and connection
+reuse, close-delimited bodies, Content-Length, chunked through the proxy,
+body-size limits, empty bodies, malformed/truncated responses, HEAD/204/304,
+and the real MCP binary fetching chunked HTTPS over CONNECT via stdio. The
+MCP case generates a throwaway CA and localhost certificate, trusts that CA
+using the existing `AGENT_FETCH_CA_FILE` option, and sets `AGENT_FETCH_PROXY`
+to an explicit `http://` loopback proxy; TLS verification remains enabled.
+Any failure prints `FAIL: <case>` and exits nonzero. The MCP `resilient_fetch`
+tool uses this same client decoder for HTTP and HTTPS.
+
 All four modules are implemented and composed in `crates/agent-client`
 (one `Client` shared by every agent in a process, optionally through a
 local HTTP proxy such as mihomo via `HTTPS_PROXY`). `cargo test
@@ -106,6 +120,7 @@ Docs: [SPEC](docs/SPEC.md) · [provenance and references](docs/PROVENANCE.md)
 · [multi-agent behind mihomo](docs/MIHOMO.md)
 · [RSI / reinforcement](docs/RSI-REINFORCEMENT.md)
 · [Cursor / MCP integration](docs/CURSOR.md)
+· [BaoLianDeng (macOS)](docs/BAOLIANDENG.md)
 
 ## Future research directions
 

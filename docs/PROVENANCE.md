@@ -51,3 +51,4 @@ implementation rests on it.
 | 19 | [Cursor docs — Network troubleshooting](https://cursor.com/docs/troubleshooting/common-issues) | Vendor docs | 4 | Low: user-side settings | HTTP Compatibility Mode, Run Diagnostics |
 | 20 | [MCP specification 2025-06-18](https://modelcontextprotocol.io/specification/2025-06-18) | Protocol spec | 5 | High: `agent-fetch-mcp` | stdio framing (newline-delimited, stderr for logs), lifecycle, version negotiation, `tools/list`/`tools/call` result shape |
 | 21 | [serde_json 1.x](https://docs.rs/serde_json) | Library | 5 | Medium: JSON-RPC parsing in `agent-fetch-mcp` | Parsing and serialising MCP messages |
+| 22 | [BaoLianDeng README](https://github.com/madeye/BaoLianDeng) | Project docs | 3 | Low: docs/BAOLIANDENG.md | Transparent proxy (`NETransparentProxyProvider`), per-app lists, meow-rs engine; no documented local HTTP port |
