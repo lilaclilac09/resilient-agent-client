@@ -1,5 +1,7 @@
 # fd-monitor
 
+Status: LOCAL ONLY — local diagnostic script, not a deployed monitoring service; next human action: choose a local test process and inspect its CSV output during a controlled harness run.
+
 Monitors a local process's open file descriptors and TCP socket states
 while a fault-injection run is in progress, and emits CSV rows for
 charting (see `docs/SPEC.md`, section 3).
