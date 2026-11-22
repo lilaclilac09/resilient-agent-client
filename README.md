@@ -1,5 +1,9 @@
 # resilient-agent-client
 
+Status: LOCAL ONLY — library, MCP tool and dashboard evidence is local/loopback, not a production integration; next human action: validate the documented MCP/proxy flow in the intended operator environment before relying on it.
+
+Acceptance evidence: [2026-11-22 audit](notes/acceptance-audit-2026-11-22.md).
+
 Resilient network client / proxy middleware for coding agents under high
 concurrency.
 
